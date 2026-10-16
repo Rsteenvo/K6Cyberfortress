@@ -1,11 +1,12 @@
 /**
  * k6 Cyber-Fortress — InfluxDB 1.8 & Grafana Datasource Client
- * Queries both aggregate and per-endpoint ("name" tag) actual response times:
+ * Queries both time-series telemetry for the 3D animation and combined per-request
+ * response time metrics across all measurements:
  *   - vus (MAX("value"))
  *   - http_reqs (SUM("value"))
- *   - http_req_duration (MIN, MEAN, PERCENTILE 50, PERCENTILE 90, PERCENTILE 95, PERCENTILE 99, MAX)
+ *   - http_req_duration (MIN, MAX, MEAN/AVG, PERCENTILE 50, PERCENTILE 90, PERCENTILE 95, PERCENTILE 99, COUNT)
  *   - http_req_failed (MEAN("value"), SUM("value"))
- *   - Per-request/endpoint breakdown grouped by "name" tag
+ *   - Combined per-request metrics across all measurements (GROUP BY "name" and GROUP BY "group")
  */
 
 export class InfluxK6Client {
@@ -78,6 +79,19 @@ export class InfluxK6Client {
     return await response.json();
   }
 
+  async checkHealth() {
+    const data = await this.queryInfluxQL('SHOW MEASUREMENTS LIMIT 1');
+    const firstResult = data?.results?.[0];
+    if (!firstResult || firstResult.error) {
+      throw new Error(firstResult?.error || 'Invalid InfluxDB response');
+    }
+    return {
+      ok: true,
+      url: this.url,
+      database: this.database
+    };
+  }
+
   async discoverMetadata() {
     const discoveryQuery = [
       'SHOW MEASUREMENTS',
@@ -108,6 +122,58 @@ export class InfluxK6Client {
     };
   }
 
+  async discoverVariableTags({ sut = 'All', testEnvironment = 'All' } = {}) {
+    const resolveTagKeyAndValues = async (candidateKeys, whereConditions = []) => {
+      const whereStr = whereConditions.length > 0 ? ` WHERE ${whereConditions.join(' AND ')}` : '';
+      const measurements = ['http_req_duration', 'http_reqs'];
+      for (const measurement of measurements) {
+        for (const key of candidateKeys) {
+          try {
+            const q = `SHOW TAG VALUES FROM "${measurement}" WITH KEY = "${key}"${whereStr}`;
+            const res = await this.queryInfluxQL(q);
+            const vals = (res?.results?.[0]?.series?.[0]?.values || [])
+              .map((row) => row[1])
+              .filter(Boolean);
+            if (vals.length > 0) {
+              return { key, values: Array.from(new Set(vals)) };
+            }
+          } catch (_) {}
+        }
+      }
+      return { key: candidateKeys[0], values: [] };
+    };
+
+    const sutResult = await resolveTagKeyAndValues(['systemUnderTest', 'system_under_test', 'sut', 'system']);
+    const envConditions = [];
+    if (sut && sut !== 'All') {
+      envConditions.push(`"${sutResult.key}" =~ /^${escapeInfluxRegex(sut)}$/`);
+    }
+
+    const envResult = await resolveTagKeyAndValues(
+      ['testEnvironment', 'test_environment', 'environment', 'env'],
+      envConditions
+    );
+
+    const runIdConditions = [...envConditions];
+    if (testEnvironment && testEnvironment !== 'All') {
+      runIdConditions.push(`"${envResult.key}" =~ /^${escapeInfluxRegex(testEnvironment)}$/`);
+    }
+
+    const runIdResult = await resolveTagKeyAndValues(
+      ['testRunId', 'testid', 'test_run_id', 'run_id'],
+      runIdConditions
+    );
+
+    return {
+      sutKey: sutResult.key,
+      sutValues: sutResult.values,
+      envKey: envResult.key,
+      envValues: envResult.values,
+      runIdKey: runIdResult.key,
+      runIdValues: runIdResult.values
+    };
+  }
+
   async detectLoadAgents(whereClause = '') {
     const candidateKeys = this.runnerTagKey && this.runnerTagKey !== 'auto'
       ? [this.runnerTagKey]
@@ -115,7 +181,7 @@ export class InfluxK6Client {
 
     for (const key of candidateKeys) {
       try {
-        const q = `SHOW TAG VALUES FROM "http_reqs" WITH KEY = "${key}" ${whereClause}`;
+        const q = `SHOW TAG VALUES FROM "http_req_duration" WITH KEY = "${key}" ${whereClause}`;
         const res = await this.queryInfluxQL(q);
         const vals = (res?.results?.[0]?.series?.[0]?.values || [])
           .map((row) => row[1])
@@ -137,26 +203,28 @@ export class InfluxK6Client {
 
   _buildStatements(whereClause, bucket) {
     return [
-      // Statement 0: Virtual Users (vus)
+      // Statement 0: Virtual Users (vus) over time
       `SELECT MAX("value") AS "vus" FROM "vus" ${whereClause} GROUP BY time(${bucket}) fill(none)`,
       // Statement 1: Total HTTP Requests per bucket (http_reqs)
       `SELECT SUM("value") AS "reqs" FROM "http_reqs" ${whereClause} GROUP BY time(${bucket}) fill(0)`,
-      // Statement 2: Overall HTTP Request Duration stats (min, mean, p50, p90, p95, p99, max)
+      // Statement 2: Overall HTTP Request Duration stats over time (min, mean, p50, p90, p95, p99, max)
       `SELECT PERCENTILE("value", 50) AS "p50", PERCENTILE("value", 95) AS "p95", PERCENTILE("value", 99) AS "p99", MEAN("value") AS "mean", MIN("value") AS "min", MAX("value") AS "max", PERCENTILE("value", 90) AS "p90" FROM "http_req_duration" ${whereClause} GROUP BY time(${bucket}) fill(none)`,
-      // Statement 3: HTTP Request Failed rate
+      // Statement 3: HTTP Request Failed rate over time
       `SELECT MEAN("value") AS "fail_rate", SUM("value") AS "fail_count" FROM "http_req_failed" ${whereClause} GROUP BY time(${bucket}) fill(0)`,
       // Statement 4: Endpoint tag names
-      `SHOW TAG VALUES FROM "http_reqs" WITH KEY = "name"`,
-      // Statement 5: Per-endpoint actual response times grouped by "name"
-      `SELECT MEAN("value") AS "mean", PERCENTILE("value", 50) AS "p50", PERCENTILE("value", 90) AS "p90", PERCENTILE("value", 95) AS "p95", PERCENTILE("value", 99) AS "p99", MAX("value") AS "max" FROM "http_req_duration" ${whereClause} GROUP BY time(${bucket}), "name" fill(none)`,
-      // Statement 6: Per-endpoint request count & error rate grouped by "name"
-      `SELECT SUM("value") AS "reqs" FROM "http_reqs" ${whereClause} GROUP BY time(${bucket}), "name" fill(0)`
+      `SHOW TAG VALUES FROM "http_req_duration" WITH KEY = "name"`,
+      // Statement 5: Exact Grafana Response Time Table query (combined per request across all measurements, GROUP BY "name")
+      `SELECT MEAN("value") as Mean, PERCENTILE("value", 90) AS "P90", PERCENTILE("value", 95) AS "P95", PERCENTILE("value", 99) AS "P99", MIN("value") AS "Min", MAX("value") AS "Max", COUNT("value") AS "Count" FROM "http_req_duration" ${whereClause} GROUP BY "name"`,
+      // Statement 6: Combined per-group fallback (GROUP BY "group")
+      `SELECT MEAN("value") as Mean, PERCENTILE("value", 90) AS "P90", PERCENTILE("value", 95) AS "P95", PERCENTILE("value", 99) AS "P99", MIN("value") AS "Min", MAX("value") AS "Max", COUNT("value") AS "Count" FROM "http_req_duration" ${whereClause} GROUP BY "group"`
     ];
   }
 
   async fetchTestExecution(options = {}) {
     const bucket = options.bucketInterval || '2s';
     const bucketSec = parseBucketToSeconds(bucket);
+    const cleanTagFilter = options.tagFilter?.trim() || '';
+    const extraTagClause = cleanTagFilter ? ` AND (${cleanTagFilter})` : '';
 
     let timeClause = '';
     if (options.timeFilterMode === 'custom' && options.startTimeISO && options.endTimeISO) {
@@ -166,17 +234,23 @@ export class InfluxK6Client {
     } else if (options.timeFilterMode === 'relative' && options.relativeWindow) {
       timeClause = `time >= now() - ${options.relativeWindow}`;
     } else {
-      const latestRes = await this.queryInfluxQL('SELECT "value" FROM "http_reqs" ORDER BY time DESC LIMIT 1');
-      const latestTs = latestRes?.results?.[0]?.series?.[0]?.values?.[0]?.[0];
+      const tagWhere = cleanTagFilter ? `WHERE (${cleanTagFilter})` : '';
+      const boundsRes = await this.queryInfluxQL(
+        `SELECT "value" FROM "http_req_duration" ${tagWhere} ORDER BY time DESC LIMIT 1; SELECT "value" FROM "http_req_duration" ${tagWhere} ORDER BY time ASC LIMIT 1`
+      );
+      const latestTs = boundsRes?.results?.[0]?.series?.[0]?.values?.[0]?.[0];
+      const earliestTs = boundsRes?.results?.[1]?.series?.[0]?.values?.[0]?.[0];
       if (!latestTs) {
-        throw new Error(`No points found in measurement "http_reqs" in database "${this.database}".`);
+        throw new Error(`No points found in measurement "http_req_duration" in database "${this.database}"${cleanTagFilter ? ` matching filter (${cleanTagFilter})` : ''}.`);
       }
-      const lookbackStart = latestTs - 2 * 3600 * 1000;
+      const defaultLookback = latestTs - 2 * 3600 * 1000;
+      const lookbackStart = cleanTagFilter && earliestTs
+        ? Math.max(earliestTs - 5000, latestTs - 12 * 3600 * 1000)
+        : defaultLookback;
       timeClause = `time >= ${lookbackStart}ms AND time <= ${latestTs + 5000}ms`;
     }
 
-    const extraTagClause = options.tagFilter?.trim() ? ` AND (${options.tagFilter.trim()})` : '';
-    const whereClause = `WHERE ${timeClause}${extraTagClause}`;
+    const whereClause = `WHERE (${timeClause})${extraTagClause}`;
 
     const statements = this._buildStatements(whereClause, bucket);
     const [rawResponse, detectedRunners] = await Promise.all([
@@ -195,7 +269,7 @@ export class InfluxK6Client {
     const bucket = options.bucketInterval || '1s';
     const bucketSec = parseBucketToSeconds(bucket);
     const extraTagClause = options.tagFilter?.trim() ? ` AND (${options.tagFilter.trim()})` : '';
-    const whereClause = `WHERE time >= now() - ${windowStr}${extraTagClause}`;
+    const whereClause = `WHERE (time >= now() - ${windowStr})${extraTagClause}`;
 
     const statements = this._buildStatements(whereClause, bucket);
     const [rawResponse, detectedRunners] = await Promise.all([
@@ -210,6 +284,10 @@ export class InfluxK6Client {
   }
 }
 
+export function escapeInfluxRegex(str) {
+  return String(str).replace(/[.*+?^${}()|[\]\\\/]/g, '\\$&');
+}
+
 export function parseBucketToSeconds(bucketStr) {
   const match = String(bucketStr).trim().match(/^(\d+(?:\.\d+)?)\s*(ms|s|m|h)?$/i);
   if (!match) return 1;
@@ -219,6 +297,123 @@ export function parseBucketToSeconds(bucketStr) {
   if (unit === 'm') return val * 60;
   if (unit === 'h') return val * 3600;
   return val;
+}
+
+/**
+ * Extracts a clean request/metric name and optional leading step number (e.g., "01_openhomepage" -> { step: "01", metric: "openhomepage" }).
+ */
+export function parseRequestMetricName(rawName, fallbackIndex = 1) {
+  const cleaned = String(rawName || '')
+    .replace(/^:+/, '')
+    .trim();
+  const match = cleaned.match(/^(\d{1,3})[\s_\-:]+(.+)$/);
+  if (match) {
+    return {
+      step: match[1].padStart(2, '0'),
+      metric: match[2].trim()
+    };
+  }
+  return {
+    step: String(fallbackIndex).padStart(2, '0'),
+    metric: cleaned || `request_${fallbackIndex}`
+  };
+}
+
+/**
+ * Combines series rows per request name so that each request (e.g., "openhomepage")
+ * appears once with all measurements aggregated into { min, max, avg, p90, p95, p99, count }.
+ */
+function buildCombinedRequestsFromSeries(seriesList = [], tagKey = 'name') {
+  const combinedMap = new Map();
+
+  for (const serie of seriesList) {
+    const rawTagVal = (serie.tags?.[tagKey] || '').replace(/^:+/, '').trim();
+    if (!rawTagVal) continue;
+
+    const cols = (serie.columns || []).map((c) => String(c).toLowerCase());
+    const idxMin = cols.indexOf('min');
+    const idxMax = cols.indexOf('max');
+    const idxAvg = cols.indexOf('mean') !== -1 ? cols.indexOf('mean') : cols.indexOf('avg');
+    const idxP90 = cols.indexOf('p90');
+    const idxP95 = cols.indexOf('p95');
+    const idxP99 = cols.indexOf('p99');
+    const idxCount = cols.indexOf('count');
+
+    for (const row of serie.values || []) {
+      const minVal = idxMin !== -1 ? Number(row[idxMin]) : null;
+      const maxVal = idxMax !== -1 ? Number(row[idxMax]) : null;
+      const avgVal = idxAvg !== -1 ? Number(row[idxAvg]) : null;
+      const p90Val = idxP90 !== -1 ? Number(row[idxP90]) : null;
+      const p95Val = idxP95 !== -1 ? Number(row[idxP95]) : null;
+      const p99Val = idxP99 !== -1 ? Number(row[idxP99]) : null;
+      const countVal = idxCount !== -1 ? Number(row[idxCount]) : 1;
+
+      if (avgVal === null && p95Val === null && minVal === null) continue;
+      const c = Math.max(1, countVal || 1);
+
+      if (!combinedMap.has(rawTagVal)) {
+        combinedMap.set(rawTagVal, {
+          rawName: rawTagVal,
+          min: minVal ?? avgVal ?? 0,
+          max: maxVal ?? p99Val ?? p95Val ?? avgVal ?? 0,
+          weightedAvgSum: (avgVal ?? p95Val ?? 0) * c,
+          p90Max: p90Val ?? p95Val ?? avgVal ?? 0,
+          p95Max: p95Val ?? avgVal ?? 0,
+          p99Max: p99Val ?? p95Val ?? avgVal ?? 0,
+          count: idxCount !== -1 ? Number(row[idxCount] || 0) : 1
+        });
+      } else {
+        const entry = combinedMap.get(rawTagVal);
+        if (minVal !== null && !Number.isNaN(minVal)) {
+          entry.min = Math.min(entry.min, minVal);
+        }
+        if (maxVal !== null && !Number.isNaN(maxVal)) {
+          entry.max = Math.max(entry.max, maxVal);
+        }
+        if (avgVal !== null && !Number.isNaN(avgVal)) {
+          entry.weightedAvgSum += avgVal * c;
+        }
+        if (p90Val !== null && !Number.isNaN(p90Val)) {
+          entry.p90Max = Math.max(entry.p90Max, p90Val);
+        }
+        if (p95Val !== null && !Number.isNaN(p95Val)) {
+          entry.p95Max = Math.max(entry.p95Max, p95Val);
+        }
+        if (p99Val !== null && !Number.isNaN(p99Val)) {
+          entry.p99Max = Math.max(entry.p99Max, p99Val);
+        }
+        entry.count += idxCount !== -1 ? Number(row[idxCount] || 0) : 1;
+      }
+    }
+  }
+
+  const sortedEntries = Array.from(combinedMap.values()).sort((a, b) =>
+    a.rawName.localeCompare(b.rawName, undefined, { numeric: true, sensitivity: 'base' })
+  );
+
+  return sortedEntries.map((item, idx) => {
+    const { step, metric } = parseRequestMetricName(item.rawName, idx + 1);
+    const totalCount = Math.max(1, Math.round(item.count));
+    const avg = Math.round(item.weightedAvgSum / totalCount);
+    const min = Math.round(item.min);
+    const p90 = Math.round(item.p90Max);
+    const p95 = Math.round(item.p95Max);
+    const p99 = Math.round(Math.max(p95, item.p99Max));
+    const max = Math.round(Math.max(p99, item.max));
+
+    return {
+      step,
+      name: metric,
+      rawName: item.rawName,
+      min,
+      max,
+      avg,
+      p90,
+      p95,
+      p99,
+      count: totalCount
+    };
+  });
 }
 
 export function normalizeInfluxResponse(rawResponse, bucketSec = 1) {
@@ -239,8 +434,7 @@ export function normalizeInfluxResponse(rawResponse, bucketSec = 1) {
         p99: null,
         max: null,
         failRate: 0,
-        failCount: 0,
-        byEndpoint: {}
+        failCount: 0
       });
     }
     return timeMap.get(ts);
@@ -287,31 +481,17 @@ export function normalizeInfluxResponse(rawResponse, bucketSec = 1) {
   const endpointValues = results[4]?.series?.[0]?.values || [];
   const endpoints = endpointValues.map((row) => row[1]).filter(Boolean).slice(0, 16);
 
-  // Statement 5: Per-endpoint http_req_duration grouped by "name"
-  const epDurSeries = results[5]?.series || [];
-  for (const serie of epDurSeries) {
-    const epName = serie.tags?.name || 'default';
-    for (const [ts, mean, p50, p90, p95, p99, max] of serie.values || []) {
-      const b = ensureBucket(ts);
-      if (!b.byEndpoint[epName]) b.byEndpoint[epName] = { name: epName, rps: 0 };
-      b.byEndpoint[epName].mean = Math.round(mean ?? p50 ?? 0);
-      b.byEndpoint[epName].p50 = Math.round(p50 ?? mean ?? 0);
-      b.byEndpoint[epName].p90 = Math.round(p90 ?? p95 ?? 0);
-      b.byEndpoint[epName].p95 = Math.round(p95 ?? mean ?? 0);
-      b.byEndpoint[epName].p99 = Math.round(p99 ?? p95 ?? 0);
-      b.byEndpoint[epName].max = Math.round(max ?? p99 ?? 0);
-    }
-  }
+  // Statement 5 & 6: Combined per-request stats across all measurements (by "name" or by "group")
+  const byNameSeries = results[5]?.series || [];
+  const byGroupSeries = results[6]?.series || [];
 
-  // Statement 6: Per-endpoint http_reqs grouped by "name"
-  const epReqSeries = results[6]?.series || [];
-  for (const serie of epReqSeries) {
-    const epName = serie.tags?.name || 'default';
-    for (const [ts, reqs] of serie.values || []) {
-      const b = ensureBucket(ts);
-      if (!b.byEndpoint[epName]) b.byEndpoint[epName] = { name: epName };
-      b.byEndpoint[epName].rps = Math.round(Number(reqs || 0) / Math.max(0.1, bucketSec));
-    }
+  let combinedRequests = buildCombinedRequestsFromSeries(byNameSeries, 'name');
+  const combinedGroups = buildCombinedRequestsFromSeries(byGroupSeries, 'group');
+
+  // If the test defined named k6 groups (e.g. "01 openhomepage") and "name" was empty or raw URLs,
+  // or if "name" had no tags, use the combined groups
+  if (combinedGroups.length > 0 && combinedRequests.length === 0) {
+    combinedRequests = combinedGroups;
   }
 
   let sorted = Array.from(timeMap.values()).sort((a, b) => a.timestamp - b.timestamp);
@@ -338,7 +518,6 @@ export function normalizeInfluxResponse(rawResponse, bucketSec = 1) {
   let lastP95 = 0;
   let lastP99 = 0;
   let lastMax = 0;
-  let lastByEndpoint = {};
   const startTs = sorted[0].timestamp;
 
   const frames = sorted.map((b, idx) => {
@@ -350,9 +529,6 @@ export function normalizeInfluxResponse(rawResponse, bucketSec = 1) {
     if (b.p95 !== null && b.p95 !== undefined) lastP95 = b.p95;
     if (b.p99 !== null && b.p99 !== undefined) lastP99 = b.p99;
     if (b.max !== null && b.max !== undefined) lastMax = b.max;
-    if (Object.keys(b.byEndpoint).length > 0) {
-      lastByEndpoint = { ...lastByEndpoint, ...b.byEndpoint };
-    }
 
     const rps = Math.round(b.reqs / Math.max(0.1, bucketSec));
     const errorRatePct = Number((b.failRate * 100).toFixed(2));
@@ -372,14 +548,40 @@ export function normalizeInfluxResponse(rawResponse, bucketSec = 1) {
       max: Math.round(lastMax),
       errorRate: errorRatePct,
       failedReqs: Math.round(b.failCount / Math.max(0.1, bucketSec)),
-      checksPassRate: Number(Math.max(0, 100 - errorRatePct).toFixed(1)),
-      endpointRows: Object.values(lastByEndpoint)
+      checksPassRate: Number(Math.max(0, 100 - errorRatePct).toFixed(1))
     };
   });
 
+  // Fallback if imported JSON had no Statement 5/6 series: aggregate across frames into 1 combined row per endpoint
+  if (combinedRequests.length === 0 && frames.length > 0) {
+    const totalCount = sorted.reduce((acc, b) => acc + Math.round(b.reqs || 0), 0) || frames.length;
+    const minAll = Math.min(...frames.map((f) => f.min || f.p50 || 0));
+    const maxAll = Math.max(...frames.map((f) => f.max || f.p99 || 0));
+    const avgAll = Math.round(frames.reduce((acc, f) => acc + (f.mean || f.p50 || 0), 0) / frames.length);
+    const p95All = Math.max(...frames.map((f) => f.p95 || 0));
+    const p99All = Math.max(...frames.map((f) => f.p99 || 0));
+
+    const epList = endpoints.length > 0 ? endpoints : ['http_req_duration'];
+    combinedRequests = epList.map((ep, idx) => {
+      const { step, metric } = parseRequestMetricName(ep, idx + 1);
+      return {
+        step,
+        name: metric,
+        rawName: ep,
+        min: minAll,
+        max: maxAll,
+        avg: avgAll,
+        p95: p95All,
+        p99: p99All,
+        count: Math.max(1, Math.round(totalCount / epList.length))
+      };
+    });
+  }
+
   return {
     frames,
-    endpoints: endpoints.length > 0 ? endpoints : Object.keys(lastByEndpoint),
+    endpoints: combinedRequests.map((r) => r.name),
+    combinedRequests,
     bucketSec
   };
 }

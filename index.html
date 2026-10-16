@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>K6 CYBER-FORTRESS // InfluxDB 1.8 Telemetry Cinema</title>
+  <title>SPARTA // TOTAL WAR — k6 Medieval Fortress Siege Cinema</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;600;700;800&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700;800;900&family=JetBrains+Mono:wght@500;600;700;800&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
@@ -14,16 +14,27 @@
     <!-- Top Command Navigation -->
     <header class="top-nav">
       <div class="brand-group">
-        <div class="brand-emblem" aria-hidden="true">K6</div>
+        <div class="brand-emblem" aria-hidden="true">Λ</div>
         <div>
-          <h1 class="brand-title">K6 Cyber-Fortress Cinema</h1>
-          <p class="brand-subtitle" id="connection-status-text">STATUS: NO DATA · CONNECT INFLUXDB 1.8 / GRAFANA</p>
+          <h1 class="brand-title">SPARTA // TOTAL WAR: K6 SIEGE CINEMA</h1>
+          <p class="brand-subtitle" id="connection-status-text">STATUS: NO DATA · CONNECT INFLUXDB 1.8 / GRAFANA TO MUSTER THE LEGIONS</p>
         </div>
       </div>
 
       <div class="toolbar-controls">
-        <div class="control-pill" title="Number of 3D Load Agents (Runners) in the visualization">
-          <label for="runner-count-select">LOAD AGENTS:</label>
+        <button
+          type="button"
+          class="health-pill disconnected"
+          id="influx-health-pill"
+          title="InfluxDB connection health check (Click to re-check now)"
+          aria-live="polite"
+        >
+          <span class="health-dot" id="influx-health-dot" aria-hidden="true"></span>
+          <span class="health-text" id="influx-health-text">INFLUXDB: DISCONNECTED</span>
+        </button>
+
+        <div class="control-pill" title="Number of 3D Load Agents (Siege Legions) in the visualization">
+          <label for="runner-count-select">SIEGE LEGIONS (AGENTS):</label>
           <select id="runner-count-select" aria-label="Number of Load Agent Runners">
             <option value="auto" selected>Auto (From DB)</option>
             <option value="1">1 Load Agent</option>
@@ -37,76 +48,115 @@
           </select>
         </div>
 
-        <button type="button" class="btn" id="live-view-btn" title="Monitor a live k6 run in real time and render on the fly">
+        <button type="button" class="btn" id="load-demo-btn" title="Load built-in Spartan Siege demo dataset">
+          ⚔️ Load Demo
+        </button>
+
+        <button type="button" class="btn" id="live-view-btn" title="Monitor a live k6 siege in real time and render on the fly">
           🔴 Live View
         </button>
 
-        <button type="button" class="btn" id="toggle-summary-btn" title="View or hide End-of-Test Executive Summary">
-          📊 Test Summary
+        <button type="button" class="btn" id="toggle-summary-btn" title="View or hide End-of-Test Imperial Battle Scroll Summary">
+          📜 Battle Summary
         </button>
 
         <button type="button" class="btn btn-primary" id="open-influx-btn">
           ⚡ InfluxDB 1.8 / Grafana
         </button>
 
-        <button type="button" class="btn btn-movie" id="generate-movie-btn" title="Rewind to start, play full test + end summary, and export 1080p WebM movie">
+        <button type="button" class="btn btn-movie" id="generate-movie-btn" title="Rewind to start, play full siege + battle summary, and export 1080p WebM movie">
           🎬 Generate Full Movie (.webm)
         </button>
       </div>
     </header>
 
-    <!-- Main Viewport Stage: Left Response Times Table + Right 3D Animation -->
+    <!-- Grafana-Style Variable Filter Menu Bar (system_under_test, test_environment, testRunId) -->
+    <nav class="variable-filter-bar" aria-label="Test Environment and Run Filters">
+      <div class="var-filter-list">
+        <div class="var-filter-group">
+          <label for="filter-sut-select" class="var-filter-label">system_under_test</label>
+          <div class="var-filter-select-wrap">
+            <select id="filter-sut-select" class="var-filter-select" aria-label="system_under_test">
+              <option value="All" selected>All</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="var-filter-group">
+          <label for="filter-env-select" class="var-filter-label">test_environment</label>
+          <div class="var-filter-select-wrap">
+            <select id="filter-env-select" class="var-filter-select" aria-label="test_environment">
+              <option value="All" selected>All</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="var-filter-group">
+          <label for="filter-runid-select" class="var-filter-label">testRunId</label>
+          <div class="var-filter-select-wrap">
+            <select id="filter-runid-select" class="var-filter-select" aria-label="testRunId">
+              <option value="All" selected>All</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div class="var-filter-actions">
+        <div class="camera-dock" role="region" aria-label="3D Zoom and Fortress Position Controls">
+          <div class="cam-slider-group">
+            <label for="cam-zoom-slider">🔍 ZOOM</label>
+            <input type="range" id="cam-zoom-slider" min="22" max="125" step="1" value="68" aria-label="Zoom in and out of the 3D fortress" />
+          </div>
+
+          <div class="cam-slider-group">
+            <label for="cam-pos-x-slider">↔ POS X</label>
+            <input type="range" id="cam-pos-x-slider" min="-45" max="45" step="1" value="0" aria-label="Horizontal position of the fortress" />
+          </div>
+
+          <div class="cam-slider-group">
+            <label for="cam-pos-y-slider">↕ POS Y</label>
+            <input type="range" id="cam-pos-y-slider" min="-30" max="40" step="1" value="0" aria-label="Vertical position and tilt of the fortress" />
+          </div>
+
+          <div class="cam-slider-group">
+            <label for="cam-orbit-slider">🔄 ROTATE</label>
+            <input type="range" id="cam-orbit-slider" min="-180" max="180" step="1" value="25" aria-label="Rotate 3D view around the fortress" />
+          </div>
+
+          <button type="button" class="cam-reset-btn" id="cam-reset-btn" title="Reset 3D Zoom and Fortress Position">
+            ↺ Reset
+          </button>
+        </div>
+
+        <button type="button" class="var-sync-btn" id="refresh-vars-btn" title="Fetch available system_under_test, test_environment, and testRunId tag values from InfluxDB">
+          ↻ Sync Filters
+        </button>
+      </div>
+    </nav>
+
+    <!-- Main Viewport Stage: Left Combined Response Times Table + Right 3D Animation -->
     <main class="viewport-stage">
-      <aside class="response-table-sidebar" aria-label="Actual k6 Response Times Table">
-        <!-- Table 1: Actual Response Times by Endpoint / Request -->
-        <section class="sidebar-section" style="max-height: 44%;">
+      <aside class="response-table-sidebar" aria-label="Combined k6 Response Times Table">
+        <section class="sidebar-section grow">
           <div class="sidebar-header">
-            <h2 class="sidebar-title">⏱ Actual Response Times (by Request)</h2>
+            <h2 class="sidebar-title">⚔️ Battle Scroll — Response Times</h2>
             <span class="sidebar-badge" id="rt-current-time-badge">NO DATA</span>
           </div>
           <div class="table-scroll">
-            <table class="rt-table" aria-label="Response times by request endpoint">
+            <table class="rt-table" aria-label="Combined response times per request across all measurements">
               <thead>
                 <tr>
-                  <th>REQUEST</th>
-                  <th>RPS</th>
-                  <th>AVG</th>
-                  <th>P50</th>
-                  <th>P95</th>
-                  <th>P99</th>
+                  <th>#</th>
+                  <th>METRICS</th>
+                  <th>MIN</th>
                   <th>MAX</th>
-                </tr>
-              </thead>
-              <tbody id="rt-endpoint-tbody">
-                <tr>
-                  <td colspan="7" class="rt-empty">NO DATA — Connect InfluxDB 1.8</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </section>
-
-        <!-- Table 2: Time-Series Actual Response Time Log -->
-        <section class="sidebar-section grow">
-          <div class="sidebar-header">
-            <h2 class="sidebar-title">📋 Actual Response Times Log (Timeline)</h2>
-            <span class="sidebar-badge" id="rt-bucket-count-badge">0 PTS</span>
-          </div>
-          <div class="table-scroll" id="rt-timeline-scroll">
-            <table class="rt-table" aria-label="Timeline log of actual k6 response times">
-              <thead>
-                <tr>
-                  <th>TIME</th>
-                  <th>VUs</th>
-                  <th>RPS</th>
                   <th>AVG</th>
-                  <th>P50</th>
                   <th>P95</th>
                   <th>P99</th>
-                  <th>ERR%</th>
+                  <th>COUNT</th>
                 </tr>
               </thead>
-              <tbody id="rt-timeline-tbody">
+              <tbody id="rt-combined-tbody">
                 <tr>
                   <td colspan="8" class="rt-empty">NO DATA — Connect InfluxDB 1.8</td>
                 </tr>
@@ -117,17 +167,8 @@
       </aside>
 
       <div class="canvas-stage-wrapper">
-        <div class="camera-dock" role="toolbar" aria-label="Camera Director Angles">
-          <button type="button" class="cam-btn active" data-cam="auto">🎥 AUTO DIRECTOR</button>
-          <button type="button" class="cam-btn" data-cam="orbit">ORBIT WIDE</button>
-          <button type="button" class="cam-btn" data-cam="agents">LOAD AGENTS</button>
-          <button type="button" class="cam-btn" data-cam="highway">BOTNET HIGHWAY</button>
-          <button type="button" class="cam-btn" data-cam="core">SUT CORE</button>
-          <button type="button" class="cam-btn" data-cam="top">HEX RADAR</button>
-        </div>
-
         <div class="canvas-frame">
-          <canvas id="cinema-canvas" width="1920" height="1080" aria-label="3D Cyber-Fortress k6 test execution visualizer"></canvas>
+          <canvas id="cinema-canvas" width="1920" height="1080" aria-label="3D Sparta Total War k6 siege execution visualizer"></canvas>
         </div>
       </div>
     </main>
