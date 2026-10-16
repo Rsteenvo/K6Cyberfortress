@@ -1,10 +1,10 @@
 /**
  * k6 Cyber-Fortress — InfluxDB 1.8 & Grafana Datasource Client
- * Queries standard k6 measurements:
- *   - vus (MEAN / MAX value)
- *   - http_reqs (SUM(value) per bucket -> RPS)
- *   - http_req_duration (PERCENTILE(value, 50), PERCENTILE(value, 95), PERCENTILE(value, 99))
- *   - http_req_failed (MEAN(value) / SUM(value))
+ * Supports:
+ *   1. Historical Test Execution loading
+ *   2. Real-time LIVE VIEW polling (on-the-fly rendering of an active k6 run)
+ *   3. Dynamic detection of active Load Agents / Runners from InfluxDB tags
+ *      (instance_id, runner, load_zone, scenario, name)
  */
 
 export class InfluxK6Client {
@@ -13,14 +13,11 @@ export class InfluxK6Client {
     this.database = config.database || 'k6';
     this.username = config.username || '';
     this.password = config.password || '';
-    this.authToken = config.authToken || ''; // For Grafana proxy or Influx Token
+    this.authToken = config.authToken || '';
+    this.runnerTagKey = config.runnerTagKey || 'auto';
     this.useLocalProxy = config.useLocalProxy ?? true;
   }
 
-  /**
-   * Executes an InfluxQL query against InfluxDB 1.8 `/query` endpoint.
-   * Automatically tries local `/api/influx` CORS proxy first if available, falling back to direct fetch.
-   */
   async queryInfluxQL(influxQL) {
     const params = new URLSearchParams({
       db: this.database,
@@ -56,7 +53,6 @@ export class InfluxK6Client {
         if (proxyResp.ok) {
           return await proxyResp.json();
         }
-        // If 404 (e.g., opened via another static server), fall through to direct fetch
         if (proxyResp.status !== 404) {
           const errText = await proxyResp.text();
           throw new Error(`InfluxDB HTTP ${proxyResp.status}: ${errText}`);
@@ -65,7 +61,6 @@ export class InfluxK6Client {
         if (err.message && err.message.startsWith('InfluxDB HTTP')) {
           throw err;
         }
-        // Fall back to direct browser request
       }
     }
 
@@ -83,7 +78,7 @@ export class InfluxK6Client {
   }
 
   /**
-   * Pings the InfluxDB 1.8 server and discovers available measurements, endpoints, and latest timestamps.
+   * Discovers measurements, latest timestamps, endpoints, and active Load Agent / Runner tags.
    */
   async discoverMetadata() {
     const discoveryQuery = [
@@ -91,7 +86,8 @@ export class InfluxK6Client {
       'SELECT "value" FROM "http_reqs" ORDER BY time DESC LIMIT 1',
       'SELECT "value" FROM "http_reqs" ORDER BY time ASC LIMIT 1',
       'SHOW TAG VALUES FROM "http_reqs" WITH KEY = "name"',
-      'SHOW TAG VALUES FROM "http_reqs" WITH KEY = "testid"'
+      'SHOW TAG VALUES FROM "http_reqs" WITH KEY = "testid"',
+      'SHOW TAG VALUES FROM "http_reqs" WITH KEY IN ("instance_id", "runner", "load_zone", "pod", "scenario")'
     ].join('; ');
 
     const data = await this.queryInfluxQL(discoveryQuery);
@@ -102,26 +98,52 @@ export class InfluxK6Client {
     const earliestPoint = results[2]?.series?.[0]?.values?.[0]?.[0] || null;
     const endpoints = (results[3]?.series?.[0]?.values || []).map((v) => v[1]).filter(Boolean);
     const testIds = (results[4]?.series?.[0]?.values || []).map((v) => v[1]).filter(Boolean);
+    const runnerTags = (results[5]?.series?.[0]?.values || []).map((v) => `${v[0]}:${v[1]}`).filter(Boolean);
 
     return {
       measurements,
       earliestTimeMs: earliestPoint,
       latestTimeMs: latestPoint,
-      endpoints: endpoints.slice(0, 12),
-      testIds
+      endpoints: endpoints.slice(0, 16),
+      testIds,
+      runnerTags
+    };
+  }
+
+  /**
+   * Resolves the list of distinct Load Agents / Runners from InfluxDB tag values.
+   */
+  async detectLoadAgents(whereClause = '') {
+    const candidateKeys = this.runnerTagKey && this.runnerTagKey !== 'auto'
+      ? [this.runnerTagKey]
+      : ['instance_id', 'runner', 'load_zone', 'pod', 'scenario', 'name'];
+
+    for (const key of candidateKeys) {
+      try {
+        const q = `SHOW TAG VALUES FROM "http_reqs" WITH KEY = "${key}" ${whereClause}`;
+        const res = await this.queryInfluxQL(q);
+        const vals = (res?.results?.[0]?.series?.[0]?.values || [])
+          .map((row) => row[1])
+          .filter(Boolean);
+        if (vals.length > 0) {
+          return {
+            tagKey: key,
+            agents: vals.slice(0, 16)
+          };
+        }
+      } catch (_) {
+        // try next candidate tag key
+      }
+    }
+
+    return {
+      tagKey: 'default',
+      agents: ['RUNNER-01']
     };
   }
 
   /**
    * Fetches a k6 test execution from InfluxDB 1.8 and normalizes it into animation frames.
-   *
-   * @param {Object} options
-   * @param {string} options.timeFilterMode - 'auto_latest' | 'relative' | 'custom'
-   * @param {string} options.relativeWindow - e.g. '15m', '1h', '6h', '24h'
-   * @param {string} options.startTimeISO - ISO string for custom start
-   * @param {string} options.endTimeISO - ISO string for custom end
-   * @param {string} options.bucketInterval - e.g. '1s', '2s', '5s', '10s'
-   * @param {string} options.tagFilter - optional tag filter e.g. testid='run-1'
    */
   async fetchTestExecution(options = {}) {
     const bucket = options.bucketInterval || '2s';
@@ -135,13 +157,11 @@ export class InfluxK6Client {
     } else if (options.timeFilterMode === 'relative' && options.relativeWindow) {
       timeClause = `time >= now() - ${options.relativeWindow}`;
     } else {
-      // Auto-locate the most recent test run in InfluxDB
       const latestRes = await this.queryInfluxQL('SELECT "value" FROM "http_reqs" ORDER BY time DESC LIMIT 1');
       const latestTs = latestRes?.results?.[0]?.series?.[0]?.values?.[0]?.[0];
       if (!latestTs) {
         throw new Error(`No points found in measurement "http_reqs" in database "${this.database}".`);
       }
-      // Look back up to 2 hours before the latest point to capture the full test window
       const lookbackStart = latestTs - 2 * 3600 * 1000;
       timeClause = `time >= ${lookbackStart}ms AND time <= ${latestTs + 5000}ms`;
     }
@@ -149,22 +169,52 @@ export class InfluxK6Client {
     const extraTagClause = options.tagFilter?.trim() ? ` AND (${options.tagFilter.trim()})` : '';
     const whereClause = `WHERE ${timeClause}${extraTagClause}`;
 
-    // Multi-statement InfluxQL query for standard k6 metrics
     const statements = [
-      // Statement 0: Virtual Users (vus)
       `SELECT MAX("value") AS "vus" FROM "vus" ${whereClause} GROUP BY time(${bucket}) fill(none)`,
-      // Statement 1: Total HTTP Requests per bucket (http_reqs)
       `SELECT SUM("value") AS "reqs" FROM "http_reqs" ${whereClause} GROUP BY time(${bucket}) fill(0)`,
-      // Statement 2: HTTP Request Duration p50, p95, p99 (http_req_duration)
       `SELECT PERCENTILE("value", 50) AS "p50", PERCENTILE("value", 95) AS "p95", PERCENTILE("value", 99) AS "p99", MEAN("value") AS "mean" FROM "http_req_duration" ${whereClause} GROUP BY time(${bucket}) fill(none)`,
-      // Statement 3: HTTP Request Failed rate (http_req_failed)
       `SELECT MEAN("value") AS "fail_rate", SUM("value") AS "fail_count" FROM "http_req_failed" ${whereClause} GROUP BY time(${bucket}) fill(0)`,
-      // Statement 4: Top endpoint names for highway labels
       `SHOW TAG VALUES FROM "http_reqs" WITH KEY = "name"`
     ];
 
-    const rawResponse = await this.queryInfluxQL(statements.join('; '));
-    return normalizeInfluxResponse(rawResponse, bucketSec);
+    const [rawResponse, detectedRunners] = await Promise.all([
+      this.queryInfluxQL(statements.join('; ')),
+      this.detectLoadAgents()
+    ]);
+
+    const normalized = normalizeInfluxResponse(rawResponse, bucketSec);
+    normalized.detectedAgents = detectedRunners.agents;
+    normalized.runnerTagKey = detectedRunners.tagKey;
+    return normalized;
+  }
+
+  /**
+   * Fetches the rolling live telemetry window for LIVE VIEW mode (`time >= now() - window`).
+   */
+  async fetchLiveTelemetry(options = {}) {
+    const windowStr = options.liveWindow || '3m';
+    const bucket = options.bucketInterval || '1s';
+    const bucketSec = parseBucketToSeconds(bucket);
+    const extraTagClause = options.tagFilter?.trim() ? ` AND (${options.tagFilter.trim()})` : '';
+    const whereClause = `WHERE time >= now() - ${windowStr}${extraTagClause}`;
+
+    const statements = [
+      `SELECT MAX("value") AS "vus" FROM "vus" ${whereClause} GROUP BY time(${bucket}) fill(none)`,
+      `SELECT SUM("value") AS "reqs" FROM "http_reqs" ${whereClause} GROUP BY time(${bucket}) fill(0)`,
+      `SELECT PERCENTILE("value", 50) AS "p50", PERCENTILE("value", 95) AS "p95", PERCENTILE("value", 99) AS "p99", MEAN("value") AS "mean" FROM "http_req_duration" ${whereClause} GROUP BY time(${bucket}) fill(none)`,
+      `SELECT MEAN("value") AS "fail_rate", SUM("value") AS "fail_count" FROM "http_req_failed" ${whereClause} GROUP BY time(${bucket}) fill(0)`,
+      `SHOW TAG VALUES FROM "http_reqs" WITH KEY = "name"`
+    ];
+
+    const [rawResponse, detectedRunners] = await Promise.all([
+      this.queryInfluxQL(statements.join('; ')),
+      this.detectLoadAgents()
+    ]);
+
+    const normalized = normalizeInfluxResponse(rawResponse, bucketSec);
+    normalized.detectedAgents = detectedRunners.agents;
+    normalized.runnerTagKey = detectedRunners.tagKey;
+    return normalized;
   }
 }
 
@@ -179,10 +229,6 @@ export function parseBucketToSeconds(bucketStr) {
   return val;
 }
 
-/**
- * Normalizes a multi-statement InfluxDB 1.8 JSON response (or imported JSON)
- * into clean time-aligned frames for the Cyber-Fortress engine.
- */
 export function normalizeInfluxResponse(rawResponse, bucketSec = 1) {
   const results = rawResponse?.results || [];
   const timeMap = new Map();
@@ -203,7 +249,6 @@ export function normalizeInfluxResponse(rawResponse, bucketSec = 1) {
     return timeMap.get(ts);
   };
 
-  // Statement 0: vus
   const vusValues = results[0]?.series?.[0]?.values || [];
   for (const [ts, vus] of vusValues) {
     if (vus !== null && vus !== undefined) {
@@ -211,7 +256,6 @@ export function normalizeInfluxResponse(rawResponse, bucketSec = 1) {
     }
   }
 
-  // Statement 1: http_reqs
   const reqValues = results[1]?.series?.[0]?.values || [];
   for (const [ts, reqs] of reqValues) {
     if (reqs !== null && reqs !== undefined) {
@@ -219,7 +263,6 @@ export function normalizeInfluxResponse(rawResponse, bucketSec = 1) {
     }
   }
 
-  // Statement 2: http_req_duration
   const durValues = results[2]?.series?.[0]?.values || [];
   for (const [ts, p50, p95, p99, mean] of durValues) {
     const b = ensureBucket(ts);
@@ -228,7 +271,6 @@ export function normalizeInfluxResponse(rawResponse, bucketSec = 1) {
     b.p99 = p99 ?? b.p95 ?? 0;
   }
 
-  // Statement 3: http_req_failed
   const failValues = results[3]?.series?.[0]?.values || [];
   for (const [ts, failRate, failCount] of failValues) {
     const b = ensureBucket(ts);
@@ -236,11 +278,9 @@ export function normalizeInfluxResponse(rawResponse, bucketSec = 1) {
     b.failCount = Number(failCount || 0);
   }
 
-  // Statement 4: Endpoint tag names
   const endpointValues = results[4]?.series?.[0]?.values || [];
-  const endpoints = endpointValues.map((row) => row[1]).filter(Boolean).slice(0, 6);
+  const endpoints = endpointValues.map((row) => row[1]).filter(Boolean).slice(0, 16);
 
-  // Sort buckets chronologically and trim leading/trailing empty zero-activity buckets
   let sorted = Array.from(timeMap.values()).sort((a, b) => a.timestamp - b.timestamp);
 
   const firstActiveIdx = sorted.findIndex((b) => (b.reqs > 0) || (b.vus && b.vus > 0) || (b.p95 && b.p95 > 0));
@@ -257,7 +297,6 @@ export function normalizeInfluxResponse(rawResponse, bucketSec = 1) {
     throw new Error('InfluxDB returned 0 active data points for the selected time window.');
   }
 
-  // Forward-fill VUs and latencies across any sparse buckets
   let lastVus = 1;
   let lastP50 = 40;
   let lastP95 = 65;
@@ -291,12 +330,12 @@ export function normalizeInfluxResponse(rawResponse, bucketSec = 1) {
   return {
     frames,
     endpoints: endpoints.length > 0 ? endpoints : [
-      'GATE-01 // INGRESS',
-      'GATE-02 // AUTH',
-      'GATE-03 // CORE-API',
-      'GATE-04 // DB-POOL',
-      'GATE-05 // CACHE',
-      'GATE-06 // WORKER'
+      '/api/v2/auth/token',
+      '/api/v2/checkout/submit',
+      '/api/v2/catalog/search',
+      '/api/v2/inventory/reserve',
+      '/api/v2/payments/authorize',
+      '/api/v2/profile/session'
     ],
     bucketSec
   };

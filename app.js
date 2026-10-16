@@ -1,5 +1,9 @@
 /**
  * k6 Cyber-Fortress — Main Application Controller
+ * Supports:
+ *  - Replay of completed k6 runs from InfluxDB 1.8 / Grafana or built-in scenarios
+ *  - Real-time LIVE VIEW monitoring & on-the-fly movie rendering
+ *  - Dynamic 3D Load Agent (Runner) count based on actual runners used
  */
 
 import { SCENARIO_PRESETS, computeThermalState } from './demo-data.js';
@@ -9,6 +13,8 @@ import { FortressVideoExporter } from './video-exporter.js';
 
 const canvas = document.getElementById('cinema-canvas');
 const scenarioSelect = document.getElementById('scenario-select');
+const runnerCountSelect = document.getElementById('runner-count-select');
+const liveViewBtn = document.getElementById('live-view-btn');
 const toggleSummaryBtn = document.getElementById('toggle-summary-btn');
 const playPauseBtn = document.getElementById('play-pause-btn');
 const restartBtn = document.getElementById('restart-btn');
@@ -25,6 +31,7 @@ const openInfluxBtn = document.getElementById('open-influx-btn');
 const closeInfluxBtn = document.getElementById('close-influx-btn');
 const testConnectionBtn = document.getElementById('test-connection-btn');
 const loadInfluxRunBtn = document.getElementById('load-influx-run-btn');
+const startLiveInfluxBtn = document.getElementById('start-live-influx-btn');
 const applySlaOnlyBtn = document.getElementById('apply-sla-only-btn');
 const influxStatusBanner = document.getElementById('influx-status-banner');
 const influxTimeMode = document.getElementById('influx-time-mode');
@@ -33,15 +40,20 @@ const customTimeGroup = document.getElementById('custom-time-group');
 const jsonFileImport = document.getElementById('json-file-import');
 
 // Initialize 3D Cyber-Fortress Director
-const director = new CyberFortressDirector(canvas);
+const director = new CyberFortressDirector(canvas, { numLoadAgents: 6 });
 
-// Playback state
+// Playback & Live Stream state
 let frames = [];
-let playheadFloat = 0; // fractional index into `frames`
+let playheadFloat = 0;
 let isPlaying = true;
-let playbackSpeed = 4; // 4 frames per second default for punchy cinema
+let playbackSpeed = 4;
 let isGeneratingFullMovie = false;
 let movieEndHoldTimer = null;
+
+// Live View Polling Timer
+let isLiveMode = false;
+let livePollInterval = null;
+let liveSimTick = 0;
 
 function syncSummaryButtonUI() {
   if (director.showSummaryOverlay) {
@@ -50,6 +62,23 @@ function syncSummaryButtonUI() {
   } else {
     toggleSummaryBtn.classList.remove('btn-primary');
     toggleSummaryBtn.textContent = '📊 Test Summary';
+  }
+}
+
+function syncLiveButtonUI() {
+  director.isLiveMode = isLiveMode;
+  if (isLiveMode) {
+    liveViewBtn.classList.add('btn-movie', 'recording');
+    liveViewBtn.textContent = '⏹ Stop Live Run';
+    timelineSlider.disabled = true;
+    playPauseBtn.disabled = true;
+    restartBtn.disabled = true;
+  } else {
+    liveViewBtn.classList.remove('btn-movie', 'recording');
+    liveViewBtn.textContent = '🔴 Live View';
+    timelineSlider.disabled = false;
+    playPauseBtn.disabled = false;
+    restartBtn.disabled = false;
   }
 }
 
@@ -85,7 +114,9 @@ function syncSliderValue() {
   const f = frames[idx];
   const totalSec = frames.length ? frames[frames.length - 1].elapsedSec : 0;
   const curSec = f ? f.elapsedSec : 0;
-  const formatted = `${formatMMSS(curSec)} / ${formatMMSS(totalSec)}`;
+  const formatted = isLiveMode
+    ? `LIVE T+${formatMMSS(curSec)}`
+    : `${formatMMSS(curSec)} / ${formatMMSS(totalSec)}`;
   timeReadout.textContent = formatted;
   timelineSlider.setAttribute('aria-valuetext', `${formatted}, P95 latency ${f ? f.p95 : 0} milliseconds`);
 
@@ -99,7 +130,16 @@ function formatMMSS(sec) {
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
+function resolveRunnerCount(detectedAgents = []) {
+  const sel = runnerCountSelect.value;
+  if (sel === 'auto') {
+    return detectedAgents && detectedAgents.length > 0 ? detectedAgents.length : 6;
+  }
+  return Math.max(1, Math.min(16, Number(sel) || 6));
+}
+
 function loadScenarioPreset(presetId) {
+  stopLiveView(false);
   const preset = SCENARIO_PRESETS[presetId] || SCENARIO_PRESETS.citadel_siege;
   frames = preset.generate();
   playheadFloat = 0;
@@ -108,16 +148,17 @@ function loadScenarioPreset(presetId) {
   timelineSlider.max = String(Math.max(1, frames.length - 1));
   timelineSlider.value = '0';
 
+  const numLoadAgents = resolveRunnerCount(preset.endpoints);
   director.setDataset(frames, {
     title: preset.name,
     sourceLabel: `K6 PRESET // ${preset.subtitle}`,
-    endpoints: preset.endpoints
+    endpoints: preset.endpoints,
+    numLoadAgents
   });
   syncSummaryButtonUI();
   syncSliderValue();
 }
 
-// Interpolate between adjacent time buckets for silky 60fps metrics progression
 function getInterpolatedFrame(floatIndex) {
   if (!frames.length) return null;
   const i0 = Math.max(0, Math.min(frames.length - 1, Math.floor(floatIndex)));
@@ -141,12 +182,147 @@ function getInterpolatedFrame(floatIndex) {
   };
 }
 
+// Live View Engine (Polls InfluxDB 1.8 in real time or streams on-the-fly telemetry)
+async function startLiveView(preferInflux = false) {
+  if (isLiveMode) stopLiveView(false);
+
+  isLiveMode = true;
+  director.showSummaryOverlay = false;
+  syncSummaryButtonUI();
+  syncLiveButtonUI();
+
+  const client = buildInfluxClientFromForm();
+  let usingRealInflux = false;
+
+  // Try polling real InfluxDB first
+  try {
+    const liveData = await client.fetchLiveTelemetry({
+      liveWindow: '3m',
+      bucketInterval: document.getElementById('influx-bucket').value || '1s',
+      tagFilter: document.getElementById('influx-tag-filter').value
+    });
+    usingRealInflux = true;
+    applyLivePollResult(liveData, client);
+  } catch (err) {
+    if (preferInflux) {
+      influxStatusBanner.classList.add('error');
+      influxStatusBanner.textContent = `⚠️ Live InfluxDB not reachable (${err.message}). Starting On-The-Fly Live Stream Simulator instead!`;
+    }
+    // Initialize Live On-The-Fly Stream from t=0
+    liveSimTick = 0;
+    const baseFrames = SCENARIO_PRESETS[scenarioSelect.value]?.generate() || SCENARIO_PRESETS.citadel_siege.generate();
+    frames = baseFrames.slice(0, 3);
+    playheadFloat = frames.length - 1;
+    const numLoadAgents = resolveRunnerCount(director.endpoints);
+    director.setDataset(frames, {
+      title: 'LIVE K6 EXECUTION STREAM',
+      sourceLabel: 'ON-THE-FLY TELEMETRY RENDERER',
+      numLoadAgents
+    });
+    connectionStatusText.textContent = `🔴 LIVE VIEW: ON-THE-FLY STREAMING (${director.numLoadAgents} LOAD AGENTS ACTIVE)`;
+  }
+
+  livePollInterval = setInterval(async () => {
+    if (!isLiveMode) return;
+
+    if (usingRealInflux) {
+      try {
+        const liveData = await client.fetchLiveTelemetry({
+          liveWindow: '3m',
+          bucketInterval: document.getElementById('influx-bucket').value || '1s',
+          tagFilter: document.getElementById('influx-tag-filter').value
+        });
+        applyLivePollResult(liveData, client);
+      } catch (_) {}
+    } else {
+      // Append next live second on the fly
+      liveSimTick++;
+      const template = SCENARIO_PRESETS[scenarioSelect.value]?.generate() || SCENARIO_PRESETS.citadel_siege.generate();
+      const srcFrame = template[(liveSimTick + 2) % template.length];
+      const nextIdx = frames.length;
+      const liveFrame = {
+        ...srcFrame,
+        index: nextIdx,
+        timestamp: Date.now(),
+        elapsedSec: nextIdx
+      };
+      frames.push(liveFrame);
+      if (frames.length > 180) {
+        frames.shift();
+        frames.forEach((f, idx) => { f.index = idx; });
+      }
+      playheadFloat = frames.length - 1;
+      timelineSlider.max = String(Math.max(1, frames.length - 1));
+      timelineSlider.value = String(playheadFloat);
+      director.updateLiveFrames(frames);
+      syncSliderValue();
+    }
+  }, 1000);
+}
+
+function applyLivePollResult(liveData, client) {
+  frames = liveData.frames;
+  playheadFloat = Math.max(0, frames.length - 1);
+  timelineSlider.min = '0';
+  timelineSlider.max = String(Math.max(1, frames.length - 1));
+  timelineSlider.value = String(playheadFloat);
+
+  const numLoadAgents = resolveRunnerCount(liveData.detectedAgents);
+  director.updateLiveFrames(frames, {
+    title: `LIVE // ${client.database.toUpperCase()}`,
+    sourceLabel: `${client.url} · RUNNER TAG: ${liveData.runnerTagKey}`,
+    endpoints: liveData.endpoints,
+    numLoadAgents,
+    loadAgentNames: liveData.detectedAgents
+  });
+  connectionStatusText.textContent = `🔴 LIVE INFLUXDB: ${client.url}/${client.database} (${numLoadAgents} LOAD AGENTS)`;
+  syncSliderValue();
+}
+
+function stopLiveView(showSummary = true) {
+  if (!isLiveMode) return;
+  isLiveMode = false;
+  if (livePollInterval) {
+    clearInterval(livePollInterval);
+    livePollInterval = null;
+  }
+  syncLiveButtonUI();
+
+  if (showSummary && frames.length > 1) {
+    isPlaying = false;
+    playPauseBtn.textContent = '▶ REPLAY';
+    director.showSummaryOverlay = true;
+    syncSummaryButtonUI();
+
+    if (exporter.isRecording && !movieEndHoldTimer) {
+      // Hold on the End-of-Test Summary for 3.5s so live recording ends with the summary
+      movieEndHoldTimer = setTimeout(() => {
+        movieEndHoldTimer = null;
+        if (exporter.isRecording) exporter.stopRecording();
+      }, 3500);
+    }
+  }
+}
+
 // UI Event Listeners
 scenarioSelect.addEventListener('change', (e) => {
   loadScenarioPreset(e.target.value);
   isPlaying = true;
   playPauseBtn.textContent = '⏸ PAUSE';
   connectionStatusText.textContent = `SOURCE: ${SCENARIO_PRESETS[e.target.value]?.name.toUpperCase() || 'K6 SCENARIO'}`;
+});
+
+runnerCountSelect.addEventListener('change', () => {
+  const numLoadAgents = resolveRunnerCount(director.loadAgentNames);
+  director.setLoadAgentCount(numLoadAgents, director.loadAgentNames);
+});
+
+liveViewBtn.addEventListener('click', () => {
+  if (isLiveMode) {
+    stopLiveView(true);
+  } else {
+    startLiveView(false);
+  }
 });
 
 toggleSummaryBtn.addEventListener('click', () => {
@@ -156,7 +332,6 @@ toggleSummaryBtn.addEventListener('click', () => {
 
 playPauseBtn.addEventListener('click', () => {
   if (!isPlaying && playheadFloat >= frames.length - 1) {
-    // Restart from 0 when pressing Play at the end of the test
     playheadFloat = 0;
     timelineSlider.value = '0';
     director.showSummaryOverlay = false;
@@ -193,7 +368,6 @@ speedSelect.addEventListener('change', (e) => {
   playbackSpeed = Number(e.target.value) || 4;
 });
 
-// Camera Director Dock
 document.querySelectorAll('.cam-btn').forEach((btn) => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('.cam-btn').forEach((b) => b.classList.remove('active'));
@@ -204,21 +378,21 @@ document.querySelectorAll('.cam-btn').forEach((btn) => {
   });
 });
 
-// Movie Recording Controls
 generateMovieBtn.addEventListener('click', () => {
   if (exporter.isRecording) {
     exporter.stopRecording();
     return;
   }
-  // Rewind to start, play through entire test, show End-of-Test Summary for 3.5s, and save 1080p 60fps movie
   isGeneratingFullMovie = true;
   director.showSummaryOverlay = false;
   syncSummaryButtonUI();
-  playheadFloat = 0;
-  timelineSlider.value = '0';
-  syncSliderValue();
-  isPlaying = true;
-  playPauseBtn.textContent = '⏸ PAUSE';
+  if (!isLiveMode) {
+    playheadFloat = 0;
+    timelineSlider.value = '0';
+    syncSliderValue();
+    isPlaying = true;
+    playPauseBtn.textContent = '⏸ PAUSE';
+  }
   exporter.startRecording('k6-cyber-fortress-full-movie');
 });
 
@@ -282,31 +456,42 @@ function buildInfluxClientFromForm() {
     url: document.getElementById('influx-url').value.trim(),
     database: document.getElementById('influx-db').value.trim(),
     username: document.getElementById('influx-user').value.trim(),
-    password: document.getElementById('influx-pass').value.trim()
+    password: document.getElementById('influx-pass').value.trim(),
+    runnerTagKey: document.getElementById('influx-runner-tag')?.value || 'auto'
   });
 }
 
 testConnectionBtn.addEventListener('click', async () => {
   influxStatusBanner.classList.remove('error');
-  influxStatusBanner.textContent = '⏳ Querying InfluxDB 1.8 metadata (SHOW MEASUREMENTS & latest http_reqs)...';
+  influxStatusBanner.textContent = '⏳ Querying InfluxDB 1.8 metadata & detecting active Load Agent runners...';
   try {
     const client = buildInfluxClientFromForm();
-    const meta = await client.discoverMetadata();
+    const [meta, detectedRunners] = await Promise.all([
+      client.discoverMetadata(),
+      client.detectLoadAgents()
+    ]);
     const hasK6 = meta.measurements.includes('http_reqs') || meta.measurements.includes('http_req_duration');
     const latestStr = meta.latestTimeMs ? new Date(meta.latestTimeMs).toLocaleString() : 'N/A';
     influxStatusBanner.innerHTML = hasK6
-      ? `✅ <strong>Connected to InfluxDB 1.8!</strong> Found ${meta.measurements.length} measurements (${meta.measurements.slice(0, 6).join(', ')}).<br/>Latest k6 point: <code>${latestStr}</code> · Discovered endpoints: <code>${meta.endpoints.length || 0}</code>`
-      : `⚠️ Connected to database <code>${client.database}</code>, but standard k6 measurements (<code>http_reqs</code>) were not found. Found: ${meta.measurements.join(', ') || 'none'}`;
+      ? `✅ <strong>Connected to InfluxDB 1.8!</strong> Found ${meta.measurements.length} measurements.<br/>Latest k6 point: <code>${latestStr}</code> · Detected <strong>${detectedRunners.agents.length} Load Agent(s)</strong> via tag <code>${detectedRunners.tagKey}</code>`
+      : `⚠️ Connected to database <code>${client.database}</code>, but standard k6 measurements (<code>http_reqs</code>) were not found.`;
   } catch (err) {
     influxStatusBanner.classList.add('error');
     influxStatusBanner.textContent = `❌ Connection error: ${err.message}`;
   }
 });
 
+startLiveInfluxBtn.addEventListener('click', async () => {
+  readSlaThresholdsFromForm();
+  influxDialog.close();
+  await startLiveView(true);
+});
+
 loadInfluxRunBtn.addEventListener('click', async () => {
+  stopLiveView(false);
   readSlaThresholdsFromForm();
   influxStatusBanner.classList.remove('error');
-  influxStatusBanner.textContent = '⏳ Extracting k6 time-series from InfluxDB 1.8 and building 3D Fortress timeline...';
+  influxStatusBanner.textContent = '⏳ Extracting k6 time-series & runner count from InfluxDB 1.8...';
 
   try {
     const client = buildInfluxClientFromForm();
@@ -319,14 +504,19 @@ loadInfluxRunBtn.addEventListener('click', async () => {
       tagFilter: document.getElementById('influx-tag-filter').value
     });
 
+    if (runnerCountSelect.value === 'auto' && result.detectedAgents?.length) {
+      director.setLoadAgentCount(result.detectedAgents.length, result.detectedAgents);
+    }
+
     applyExternalDataset(
       result.frames,
-      `LIVE INFLUXDB // ${client.database.toUpperCase()}`,
-      `${client.url} (${result.frames.length} buckets @ ${result.bucketSec}s)`,
-      result.endpoints
+      `INFLUXDB // ${client.database.toUpperCase()}`,
+      `${client.url} (${result.frames.length} pts · ${director.numLoadAgents} Load Agents)`,
+      result.endpoints,
+      result.detectedAgents
     );
 
-    influxStatusBanner.textContent = `✅ Loaded ${result.frames.length} time buckets from InfluxDB 1.8!`;
+    influxStatusBanner.textContent = `✅ Loaded ${result.frames.length} time buckets and ${director.numLoadAgents} Load Agents from InfluxDB 1.8!`;
     setTimeout(() => influxDialog.close(), 500);
   } catch (err) {
     influxStatusBanner.classList.add('error');
@@ -334,11 +524,11 @@ loadInfluxRunBtn.addEventListener('click', async () => {
   }
 });
 
-// Support importing a saved InfluxDB JSON query dump or custom frame array JSON
 jsonFileImport.addEventListener('change', async (e) => {
   const file = e.target.files?.[0];
   if (!file) return;
   try {
+    stopLiveView(false);
     const text = await file.text();
     const json = JSON.parse(text);
     let loadedFrames = [];
@@ -373,7 +563,7 @@ jsonFileImport.addEventListener('change', async (e) => {
   }
 });
 
-function applyExternalDataset(newFrames, title, sourceLabel, endpoints) {
+function applyExternalDataset(newFrames, title, sourceLabel, endpoints, detectedAgents = []) {
   frames = newFrames;
   playheadFloat = 0;
   timelineSlider.min = '0';
@@ -389,8 +579,15 @@ function applyExternalDataset(newFrames, title, sourceLabel, endpoints) {
   customOpt.textContent = `${title} (${frames.length} pts)`;
   scenarioSelect.value = 'custom_influx';
 
+  const numLoadAgents = resolveRunnerCount(detectedAgents.length ? detectedAgents : endpoints);
   connectionStatusText.textContent = `SOURCE: ${title} · ${sourceLabel}`;
-  director.setDataset(frames, { title, sourceLabel, endpoints });
+  director.setDataset(frames, {
+    title,
+    sourceLabel,
+    endpoints,
+    numLoadAgents,
+    loadAgentNames: detectedAgents
+  });
   syncSummaryButtonUI();
   syncSliderValue();
   isPlaying = true;
@@ -404,11 +601,10 @@ function animate(now) {
   const dt = Math.min(0.1, (now - lastRafTime) / 1000);
   lastRafTime = now;
 
-  if (isPlaying && frames.length > 1) {
+  if (!isLiveMode && isPlaying && frames.length > 1) {
     playheadFloat += dt * playbackSpeed;
 
     if (playheadFloat >= frames.length - 1) {
-      // Reached the end of the test execution: display the End-of-Test Summary!
       playheadFloat = frames.length - 1;
       isPlaying = false;
       playPauseBtn.textContent = '▶ REPLAY';
@@ -416,7 +612,6 @@ function animate(now) {
       syncSummaryButtonUI();
 
       if (isGeneratingFullMovie && exporter.isRecording && !movieEndHoldTimer) {
-        // Hold on the End-of-Test Summary screen for 3.5 seconds so it's baked into the exported WebM movie
         movieEndHoldTimer = setTimeout(() => {
           movieEndHoldTimer = null;
           if (exporter.isRecording) {

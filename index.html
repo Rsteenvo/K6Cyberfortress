@@ -31,12 +31,31 @@
           </select>
         </div>
 
+        <div class="control-pill" title="Number of 3D Load Agents (Runners) in the visualization">
+          <label for="runner-count-select">LOAD AGENTS:</label>
+          <select id="runner-count-select" aria-label="Number of Load Agent Runners">
+            <option value="auto">Auto (From DB)</option>
+            <option value="1">1 Load Agent</option>
+            <option value="2">2 Load Agents</option>
+            <option value="3">3 Load Agents</option>
+            <option value="4">4 Load Agents</option>
+            <option value="6" selected>6 Load Agents</option>
+            <option value="8">8 Load Agents</option>
+            <option value="10">10 Load Agents</option>
+            <option value="12">12 Load Agents</option>
+          </select>
+        </div>
+
+        <button type="button" class="btn" id="live-view-btn" title="Monitor a live k6 run in real time and render on the fly">
+          🔴 Live View
+        </button>
+
         <button type="button" class="btn" id="toggle-summary-btn" title="View or hide End-of-Test Executive Summary">
           📊 Test Summary
         </button>
 
         <button type="button" class="btn btn-primary" id="open-influx-btn">
-          ⚡ Connect InfluxDB 1.8 / Grafana
+          ⚡ InfluxDB 1.8 / Grafana
         </button>
 
         <button type="button" class="btn btn-movie" id="generate-movie-btn" title="Rewind to start, play full test + end summary, and export 1080p WebM movie">
@@ -129,9 +148,22 @@
         </div>
 
         <div class="form-field">
+          <label for="influx-runner-tag">Load Agent / Runner Tag Key (Auto-Counts Runners)</label>
+          <select id="influx-runner-tag">
+            <option value="auto" selected>Auto-Detect (instance_id / runner / load_zone / scenario)</option>
+            <option value="instance_id">Tag: instance_id</option>
+            <option value="runner">Tag: runner</option>
+            <option value="load_zone">Tag: load_zone</option>
+            <option value="pod">Tag: pod</option>
+            <option value="scenario">Tag: scenario</option>
+            <option value="name">Tag: name (Endpoint Stream)</option>
+          </select>
+        </div>
+
+        <div class="form-field">
           <label for="influx-bucket">Time Group Bucket Resolution</label>
           <select id="influx-bucket">
-            <option value="1s">1s (High Resolution)</option>
+            <option value="1s">1s (High Resolution / Live)</option>
             <option value="2s" selected>2s (Recommended)</option>
             <option value="5s">5s (Long Soak Tests)</option>
             <option value="10s">10s (Multi-Hour Runs)</option>
@@ -204,9 +236,10 @@
 
       <div class="dialog-actions">
         <button type="button" class="btn" id="test-connection-btn">🔍 Scan & Verify DB</button>
-        <div style="display: flex; gap: 0.6rem;">
-          <button type="button" class="btn" id="apply-sla-only-btn">Apply SLA Thresholds</button>
-          <button type="button" class="btn btn-primary" id="load-influx-run-btn">🚀 Load Test & Build Movie</button>
+        <div style="display: flex; gap: 0.6rem; flex-wrap: wrap;">
+          <button type="button" class="btn" id="apply-sla-only-btn">Apply SLA & SUT</button>
+          <button type="button" class="btn btn-movie" id="start-live-influx-btn">🔴 Monitor Live Run</button>
+          <button type="button" class="btn btn-primary" id="load-influx-run-btn">🚀 Load Completed Test</button>
         </div>
       </div>
     </form>

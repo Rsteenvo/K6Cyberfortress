@@ -1,8 +1,9 @@
 /**
  * k6 Cyber-Fortress — 3D WebGL Scene + Broadcast HUD Compositor
  * Features:
+ *  - Dynamic 1..16 3D "Load Agent" (Runner) Generator Stations based on actual runners used
+ *  - Real-time LIVE VIEW mode for monitoring & recording a live k6 test on the fly
  *  - Central SUT (System Under Test) Cyber-Fortress with thermal core & congestion queue ring
- *  - 6 Outer 3D "Load Agent" Generator Nodes spawning bot traffic down 6 radial highways
  *  - Dedicated multi-series K6 Response Times (P50 / P95 / P99) & HTTP Errors dual-axis graph
  *  - End-of-Test Executive Summary Report rendered directly onto the broadcast/movie canvas
  */
@@ -13,7 +14,6 @@ import { computeThermalState } from './demo-data.js';
 const MAX_HIGHWAY_BOTS = 1100;
 const MAX_QUEUE_BOTS = 650;
 const MAX_THERMAL_PARTICLES = 550;
-const NUM_HIGHWAYS = 6;
 const LOAD_AGENT_RADIUS = 82;
 
 export class CyberFortressDirector {
@@ -31,6 +31,10 @@ export class CyberFortressDirector {
       criticalMs: 1100
     };
 
+    this.numLoadAgents = options.numLoadAgents || 6;
+    this.loadAgentNames = [];
+    this.isLiveMode = false;
+
     this.cameraMode = 'auto'; // 'auto' | 'orbit' | 'highway' | 'agents' | 'core' | 'top'
     this.showHudInCanvas = true;
     this.showSummaryOverlay = false;
@@ -46,7 +50,6 @@ export class CyberFortressDirector {
       '/api/v2/profile/session'
     ];
 
-    // Live interpolated state
     this.currentFrame = {
       index: 0,
       elapsedSec: 0,
@@ -67,7 +70,6 @@ export class CyberFortressDirector {
     this.smoothedVus = 100;
     this.smoothedP95 = 65;
 
-    // User pointer orbit offsets
     this.userAzimuthOffset = 0;
     this.userElevationOffset = 0;
     this.userZoom = 1.0;
@@ -76,8 +78,8 @@ export class CyberFortressDirector {
     this.shockwaves = [];
 
     this._initThreeScene();
-    this._buildFortressGeometry();
-    this._buildLoadAgentStations();
+    this._buildStaticFortressCore();
+    this._rebuildDynamicLoadAgentsAndHighways(this.numLoadAgents);
     this._initBotSwarms();
     this._initThermalParticles();
     this._bindPointerControls();
@@ -107,7 +109,6 @@ export class CyberFortressDirector {
     this.camera.position.set(0, 34, 58);
     this.cameraTarget = new THREE.Vector3(0, 4, 0);
 
-    // Lighting
     this.ambientLight = new THREE.AmbientLight(0x122438, 1.85);
     this.scene.add(this.ambientLight);
 
@@ -124,7 +125,7 @@ export class CyberFortressDirector {
     this.scene.add(this.rimLight2);
   }
 
-  _buildFortressGeometry() {
+  _buildStaticFortressCore() {
     this.fortressGroup = new THREE.Group();
     this.scene.add(this.fortressGroup);
 
@@ -159,7 +160,7 @@ export class CyberFortressDirector {
       emissiveIntensity: 0.5
     });
     this.citadelBaseMat = baseMat;
-    this.thermalEdgeMaterials = [];
+    this.staticThermalEdgeMaterials = [];
 
     for (let tier = 0; tier < 3; tier++) {
       const radius = 9.5 - tier * 2.2;
@@ -177,7 +178,7 @@ export class CyberFortressDirector {
       });
       const wireframe = new THREE.LineSegments(edges, lineMat);
       cylMesh.add(wireframe);
-      this.thermalEdgeMaterials.push(lineMat);
+      this.staticThermalEdgeMaterials.push(lineMat);
     }
 
     // 3. The SUT Reactor Core (Inner Geodesic Crystal + 3 Gimbal Containment Rings + Plasma Column)
@@ -215,7 +216,7 @@ export class CyberFortressDirector {
       ring.position.y = 9.2;
       this.fortressGroup.add(ring);
       this.gimbalRings.push(ring);
-      this.thermalEdgeMaterials.push(torusMat);
+      this.staticThermalEdgeMaterials.push(torusMat);
     }
 
     // Vertical Plasma Spire Beam
@@ -232,105 +233,7 @@ export class CyberFortressDirector {
     this.plasmaBeam.position.y = 26;
     this.fortressGroup.add(this.plasmaBeam);
 
-    // 4. Outer Bastion Wall Segments & 6 Highway Gate Pylons
-    this.bastionPylons = [];
-    this.gateWorldPositions = [];
-
-    for (let i = 0; i < NUM_HIGHWAYS; i++) {
-      const angle = (i * Math.PI * 2) / NUM_HIGHWAYS;
-      const gateRadius = 18;
-      const gx = Math.cos(angle) * gateRadius;
-      const gz = Math.sin(angle) * gateRadius;
-      this.gateWorldPositions.push(new THREE.Vector3(gx, 2.0, gz));
-
-      const gateGroup = new THREE.Group();
-      gateGroup.position.set(gx, 0, gz);
-      gateGroup.rotation.y = -angle + Math.PI / 2;
-
-      const towerGeo = new THREE.BoxGeometry(2.1, 9.5, 2.1);
-      const towerEdges = new THREE.EdgesGeometry(towerGeo);
-
-      [-3.4, 3.4].forEach((offsetX) => {
-        const tower = new THREE.Mesh(towerGeo, baseMat);
-        tower.position.set(offsetX, 4.75, 0);
-        const edgeMat = new THREE.LineBasicMaterial({ color: 0x00f0ff, transparent: true, opacity: 0.8 });
-        tower.add(new THREE.LineSegments(towerEdges, edgeMat));
-        this.thermalEdgeMaterials.push(edgeMat);
-
-        const capGeo = new THREE.BoxGeometry(1.5, 0.8, 1.5);
-        const capMat = new THREE.MeshBasicMaterial({ color: 0x00f0ff });
-        const cap = new THREE.Mesh(capGeo, capMat);
-        cap.position.set(0, 5.1, 0);
-        tower.add(cap);
-        this.bastionPylons.push(capMat);
-
-        gateGroup.add(tower);
-      });
-
-      const archGeo = new THREE.BoxGeometry(8.8, 0.9, 1.4);
-      const arch = new THREE.Mesh(archGeo, baseMat);
-      arch.position.set(0, 9.2, 0);
-      gateGroup.add(arch);
-
-      this.fortressGroup.add(gateGroup);
-
-      // 5. Radial Cyber-Highway Lanes (from r=18 out to LOAD_AGENT_RADIUS=82)
-      const laneLen = LOAD_AGENT_RADIUS - gateRadius;
-      const laneGeo = new THREE.PlaneGeometry(4.6, laneLen);
-      laneGeo.rotateX(-Math.PI / 2);
-      const laneMat = new THREE.MeshBasicMaterial({
-        color: 0x062338,
-        side: THREE.DoubleSide,
-        transparent: true,
-        opacity: 0.72
-      });
-      const laneMesh = new THREE.Mesh(laneGeo, laneMat);
-      const midR = gateRadius + laneLen / 2;
-      laneMesh.position.set(Math.cos(angle) * midR, 0.03, Math.sin(angle) * midR);
-      laneMesh.rotation.y = -angle + Math.PI / 2;
-      this.fortressGroup.add(laneMesh);
-
-      const railGeo = new THREE.PlaneGeometry(0.22, laneLen);
-      railGeo.rotateX(-Math.PI / 2);
-      const railMat = new THREE.MeshBasicMaterial({
-        color: 0x00f0ff,
-        side: THREE.DoubleSide,
-        transparent: true,
-        opacity: 0.85
-      });
-      this.thermalEdgeMaterials.push(railMat);
-
-      [-2.35, 2.35].forEach((railOffset) => {
-        const rail = new THREE.Mesh(railGeo, railMat);
-        const perpAngle = angle + Math.PI / 2;
-        rail.position.set(
-          Math.cos(angle) * midR + Math.cos(perpAngle) * railOffset,
-          0.06,
-          Math.sin(angle) * midR + Math.sin(perpAngle) * railOffset
-        );
-        rail.rotation.y = -angle + Math.PI / 2;
-        this.fortressGroup.add(rail);
-      });
-    }
-
-    // 6. Inner Hexagonal Bastion Defensive Walls (at r=17.8 between gates)
-    for (let i = 0; i < NUM_HIGHWAYS; i++) {
-      const a1 = (i * Math.PI * 2) / NUM_HIGHWAYS + 0.22;
-      const a2 = ((i + 1) * Math.PI * 2) / NUM_HIGHWAYS - 0.22;
-      const midA = (a1 + a2) / 2;
-      const wallR = 17.8;
-      const wallGeo = new THREE.BoxGeometry(10.5, 4.2, 1.1);
-      const wall = new THREE.Mesh(wallGeo, baseMat);
-      wall.position.set(Math.cos(midA) * wallR, 2.1, Math.sin(midA) * wallR);
-      wall.rotation.y = -midA + Math.PI / 2;
-      const wallEdges = new THREE.EdgesGeometry(wallGeo);
-      const wallEdgeMat = new THREE.LineBasicMaterial({ color: 0x00b8ff, transparent: true, opacity: 0.55 });
-      wall.add(new THREE.LineSegments(wallEdges, wallEdgeMat));
-      this.thermalEdgeMaterials.push(wallEdgeMat);
-      this.fortressGroup.add(wall);
-    }
-
-    // 7. Outer Energy Shield Dome (Geodesic Wireframe Hemisphere around SUT)
+    // Outer Energy Shield Dome (Geodesic Wireframe Hemisphere around SUT)
     const domeGeo = new THREE.IcosahedronGeometry(20.5, 2);
     this.shieldDomeMat = new THREE.MeshBasicMaterial({
       color: 0x00f0ff,
@@ -346,15 +249,41 @@ export class CyberFortressDirector {
   }
 
   /**
-   * Builds 6 3D "Load Agent" Generator Stations at the origin of each input stream (r = 82).
-   * Each Load Agent has a cyber platform, spinning injector ring, and glowing plasma core
-   * that visually spawns the bot swarms rushing toward the SUT!
+   * Dynamically builds `count` (1..16) 3D Load Agent (Runner) stations, radial highways,
+   * and SUT Bastion Gates based on the actual number of Load Agents used in the test.
    */
-  _buildLoadAgentStations() {
+  setLoadAgentCount(count, agentNames = []) {
+    const clamped = Math.max(1, Math.min(16, Math.round(Number(count) || 6)));
+    this.numLoadAgents = clamped;
+    if (Array.isArray(agentNames) && agentNames.length) {
+      this.loadAgentNames = agentNames.slice(0, clamped);
+    }
+    this._rebuildDynamicLoadAgentsAndHighways(clamped);
+
+    // Re-distribute highway bots across the active `clamped` input streams
+    if (this.highwayBots) {
+      this.highwayBots.forEach((b, idx) => {
+        b.lane = idx % clamped;
+      });
+    }
+    this.summaryStats = this._computeSummaryStats();
+  }
+
+  _rebuildDynamicLoadAgentsAndHighways(numAgents) {
+    if (this.dynamicPerimeterGroup) {
+      this.fortressGroup.remove(this.dynamicPerimeterGroup);
+    }
+    this.dynamicPerimeterGroup = new THREE.Group();
+    this.fortressGroup.add(this.dynamicPerimeterGroup);
+
+    this.dynamicThermalEdgeMaterials = [];
+    this.bastionPylons = [];
+    this.gateWorldPositions = [];
     this.loadAgentWorldPositions = [];
     this.loadAgentRings = [];
     this.loadAgentCores = [];
 
+    const baseMat = this.citadelBaseMat;
     const agentBaseMat = new THREE.MeshStandardMaterial({
       color: 0x081c34,
       metalness: 0.85,
@@ -363,35 +292,107 @@ export class CyberFortressDirector {
       emissiveIntensity: 0.65
     });
 
-    for (let i = 0; i < NUM_HIGHWAYS; i++) {
-      const angle = (i * Math.PI * 2) / NUM_HIGHWAYS;
+    const gateRadius = 18;
+    const laneLen = LOAD_AGENT_RADIUS - gateRadius;
+    const midR = gateRadius + laneLen / 2;
+
+    for (let i = 0; i < numAgents; i++) {
+      const angle = (i * Math.PI * 2) / numAgents;
+      const gx = Math.cos(angle) * gateRadius;
+      const gz = Math.sin(angle) * gateRadius;
+      this.gateWorldPositions.push(new THREE.Vector3(gx, 2.0, gz));
+
+      // 1. SUT Gate Archway at r=18
+      const gateGroup = new THREE.Group();
+      gateGroup.position.set(gx, 0, gz);
+      gateGroup.rotation.y = -angle + Math.PI / 2;
+
+      const towerGeo = new THREE.BoxGeometry(1.9, 9.2, 1.9);
+      const towerEdges = new THREE.EdgesGeometry(towerGeo);
+
+      [-3.1, 3.1].forEach((offsetX) => {
+        const tower = new THREE.Mesh(towerGeo, baseMat);
+        tower.position.set(offsetX, 4.6, 0);
+        const edgeMat = new THREE.LineBasicMaterial({ color: 0x00f0ff, transparent: true, opacity: 0.8 });
+        tower.add(new THREE.LineSegments(towerEdges, edgeMat));
+        this.dynamicThermalEdgeMaterials.push(edgeMat);
+
+        const capGeo = new THREE.BoxGeometry(1.4, 0.8, 1.4);
+        const capMat = new THREE.MeshBasicMaterial({ color: 0x00f0ff });
+        const cap = new THREE.Mesh(capGeo, capMat);
+        cap.position.set(0, 4.9, 0);
+        tower.add(cap);
+        this.bastionPylons.push(capMat);
+
+        gateGroup.add(tower);
+      });
+
+      const archGeo = new THREE.BoxGeometry(8.0, 0.85, 1.3);
+      const arch = new THREE.Mesh(archGeo, baseMat);
+      arch.position.set(0, 8.9, 0);
+      gateGroup.add(arch);
+      this.dynamicPerimeterGroup.add(gateGroup);
+
+      // 2. Radial Cyber-Highway Lane connecting Load Agent i -> SUT Gate i
+      const laneGeo = new THREE.PlaneGeometry(4.2, laneLen);
+      laneGeo.rotateX(-Math.PI / 2);
+      const laneMat = new THREE.MeshBasicMaterial({
+        color: 0x062338,
+        side: THREE.DoubleSide,
+        transparent: true,
+        opacity: 0.72
+      });
+      const laneMesh = new THREE.Mesh(laneGeo, laneMat);
+      laneMesh.position.set(Math.cos(angle) * midR, 0.03, Math.sin(angle) * midR);
+      laneMesh.rotation.y = -angle + Math.PI / 2;
+      this.dynamicPerimeterGroup.add(laneMesh);
+
+      const railGeo = new THREE.PlaneGeometry(0.22, laneLen);
+      railGeo.rotateX(-Math.PI / 2);
+      const railMat = new THREE.MeshBasicMaterial({
+        color: 0x00f0ff,
+        side: THREE.DoubleSide,
+        transparent: true,
+        opacity: 0.85
+      });
+      this.dynamicThermalEdgeMaterials.push(railMat);
+
+      [-2.15, 2.15].forEach((railOffset) => {
+        const rail = new THREE.Mesh(railGeo, railMat);
+        const perpAngle = angle + Math.PI / 2;
+        rail.position.set(
+          Math.cos(angle) * midR + Math.cos(perpAngle) * railOffset,
+          0.06,
+          Math.sin(angle) * midR + Math.sin(perpAngle) * railOffset
+        );
+        rail.rotation.y = -angle + Math.PI / 2;
+        this.dynamicPerimeterGroup.add(rail);
+      });
+
+      // 3. Outer 3D Load Agent (Runner) Generator Station at r = LOAD_AGENT_RADIUS
       const ax = Math.cos(angle) * LOAD_AGENT_RADIUS;
       const az = Math.sin(angle) * LOAD_AGENT_RADIUS;
-
       this.loadAgentWorldPositions.push(new THREE.Vector3(ax, 12.5, az));
 
       const agentGroup = new THREE.Group();
       agentGroup.position.set(ax, 0, az);
       agentGroup.rotation.y = -angle + Math.PI / 2;
 
-      // Hexagonal Emitter Pedestal
-      const padGeo = new THREE.CylinderGeometry(5.2, 6.2, 2.2, 6);
+      const padGeo = new THREE.CylinderGeometry(5.0, 6.0, 2.2, 6);
       const padMesh = new THREE.Mesh(padGeo, agentBaseMat);
       padMesh.position.y = 1.1;
       const padEdges = new THREE.EdgesGeometry(padGeo);
       padMesh.add(new THREE.LineSegments(padEdges, new THREE.LineBasicMaterial({ color: 0x00f0ff })));
       agentGroup.add(padMesh);
 
-      // Vertical Load Agent Pylon Spire
-      const pylonGeo = new THREE.CylinderGeometry(1.4, 2.6, 8.5, 6);
+      const pylonGeo = new THREE.CylinderGeometry(1.3, 2.5, 8.5, 6);
       const pylonMesh = new THREE.Mesh(pylonGeo, agentBaseMat);
       pylonMesh.position.y = 5.5;
       const pylonEdges = new THREE.EdgesGeometry(pylonGeo);
       pylonMesh.add(new THREE.LineSegments(pylonEdges, new THREE.LineBasicMaterial({ color: 0x38bdf8 })));
       agentGroup.add(pylonMesh);
 
-      // Glowing Bot-Spawner Core Sphere
-      const orbGeo = new THREE.OctahedronGeometry(2.1, 1);
+      const orbGeo = new THREE.OctahedronGeometry(2.0, 1);
       const orbMat = new THREE.MeshBasicMaterial({
         color: 0x00f0ff,
         wireframe: true
@@ -401,17 +402,14 @@ export class CyberFortressDirector {
       agentGroup.add(orbMesh);
       this.loadAgentCores.push(orbMesh);
 
-      // Directional Accelerator Portal Ring aimed down the highway toward the SUT
-      const portalGeo = new THREE.TorusGeometry(3.4, 0.22, 10, 32);
-      const portalMat = new THREE.MeshBasicMaterial({
-        color: 0x00f0ff
-      });
+      const portalGeo = new THREE.TorusGeometry(3.2, 0.22, 10, 32);
+      const portalMat = new THREE.MeshBasicMaterial({ color: 0x00f0ff });
       const portalRing = new THREE.Mesh(portalGeo, portalMat);
       portalRing.position.set(0, 4.2, -3.5);
       agentGroup.add(portalRing);
       this.loadAgentRings.push(portalRing);
 
-      this.fortressGroup.add(agentGroup);
+      this.dynamicPerimeterGroup.add(agentGroup);
     }
   }
 
@@ -431,11 +429,11 @@ export class CyberFortressDirector {
     this.highwayBots = [];
     const dummyColor = new THREE.Color();
     for (let i = 0; i < MAX_HIGHWAY_BOTS; i++) {
-      const lane = i % NUM_HIGHWAYS;
+      const lane = i % this.numLoadAgents;
       this.highwayBots.push({
         lane,
         distance: 18 + Math.random() * (LOAD_AGENT_RADIUS - 18),
-        laneOffset: (Math.random() - 0.5) * 3.5,
+        laneOffset: (Math.random() - 0.5) * 3.2,
         altitude: 0.6 + Math.random() * 1.8,
         speedFactor: 0.75 + Math.random() * 0.55,
         isErrorBot: false
@@ -444,7 +442,6 @@ export class CyberFortressDirector {
       this.highwayBotMesh.setColorAt(i, dummyColor);
     }
 
-    // Inner Congestion Queue Bot InstancedMesh (bots orbiting inside the SUT while waiting for response time!)
     const queueGeo = new THREE.OctahedronGeometry(0.48, 0);
     queueGeo.scale(0.9, 0.9, 1.8);
     this.queueBotMat = new THREE.MeshBasicMaterial({
@@ -540,11 +537,32 @@ export class CyberFortressDirector {
     if (metadata.sourceLabel) this.sourceLabel = metadata.sourceLabel.toUpperCase();
     if (metadata.sutName) this.sutName = metadata.sutName.toUpperCase();
     if (metadata.endpoints && metadata.endpoints.length) {
-      this.endpoints = metadata.endpoints.slice(0, 6);
+      this.endpoints = metadata.endpoints.slice(0, 16);
+    }
+    if (metadata.numLoadAgents) {
+      this.setLoadAgentCount(metadata.numLoadAgents, metadata.loadAgentNames || []);
     }
     this.showSummaryOverlay = false;
     this.summaryStats = this._computeSummaryStats();
-    this.setFrameData(this.allFrames[0]);
+    this.setFrameData(this.allFrames[this.allFrames.length - 1] && this.isLiveMode ? this.allFrames[this.allFrames.length - 1] : this.allFrames[0]);
+  }
+
+  /**
+   * Appends or updates rolling frames during LIVE VIEW without resetting camera or overlay state.
+   */
+  updateLiveFrames(frames, metadata = {}) {
+    if (!frames || !frames.length) return;
+    this.allFrames = frames;
+    if (metadata.title) this.testTitle = metadata.title.toUpperCase();
+    if (metadata.sourceLabel) this.sourceLabel = metadata.sourceLabel.toUpperCase();
+    if (metadata.endpoints && metadata.endpoints.length) {
+      this.endpoints = metadata.endpoints.slice(0, 16);
+    }
+    if (metadata.numLoadAgents && metadata.numLoadAgents !== this.numLoadAgents) {
+      this.setLoadAgentCount(metadata.numLoadAgents, metadata.loadAgentNames || []);
+    }
+    this.summaryStats = this._computeSummaryStats();
+    this.setFrameData(this.allFrames[this.allFrames.length - 1]);
   }
 
   setThresholds(thresholds) {
@@ -559,9 +577,18 @@ export class CyberFortressDirector {
     this.thermal = computeThermalState(frame, this.thresholds);
   }
 
-  /**
-   * Computes comprehensive end-of-test aggregate statistics across all frames & Load Agents.
-   */
+  _getAgentWeights(n) {
+    // Slightly varied realistic distribution that sums to 1.0 across the N active Load Agents
+    const raw = [];
+    let sum = 0;
+    for (let i = 0; i < n; i++) {
+      const w = 1.0 - (i / Math.max(1, n * 2.8));
+      raw.push(w);
+      sum += w;
+    }
+    return raw.map((w) => w / sum);
+  }
+
   _computeSummaryStats() {
     const frames = this.allFrames || [];
     if (!frames.length) return null;
@@ -615,20 +642,23 @@ export class CyberFortressDirector {
       verdictColor = '#ffaa00';
     }
 
-    // Per-Load-Agent distribution (6 input streams)
-    const weightDistribution = [0.22, 0.19, 0.18, 0.16, 0.14, 0.11];
+    const numAgents = this.numLoadAgents;
+    const weights = this._getAgentWeights(numAgents);
     const agentBreakdown = [];
-    for (let i = 0; i < NUM_HIGHWAYS; i++) {
-      const w = weightDistribution[i];
+    for (let i = 0; i < numAgents; i++) {
+      const w = weights[i];
+      const customRunnerName = this.loadAgentNames[i];
       const ep = this.endpoints[i % this.endpoints.length] || `/api/stream-${i + 1}`;
       agentBreakdown.push({
-        agentId: `LOAD-AGENT-0${i + 1}`,
+        agentId: customRunnerName
+          ? `AGENT ${String(i + 1).padStart(2, '0')} (${customRunnerName.slice(0, 14)})`
+          : `LOAD-AGENT-${String(i + 1).padStart(2, '0')}`,
         endpoint: ep,
         peakVus: Math.max(1, Math.round(maxVus * w)),
         totalReqs: Math.round(totalReqs * w),
         peakRps: Math.round(peakRps * w),
-        avgP95: Math.round(avgP95 * (0.88 + i * 0.05)),
-        errorPct: Number((overallErrorPct * (0.85 + (i % 3) * 0.15)).toFixed(2))
+        avgP95: Math.round(avgP95 * (0.9 + (i % 4) * 0.04)),
+        errorPct: Number((overallErrorPct * (0.88 + (i % 3) * 0.12)).toFixed(2))
       });
     }
 
@@ -653,8 +683,8 @@ export class CyberFortressDirector {
   }
 
   _spawnErrorShockwave() {
-    const lane = Math.floor(Math.random() * NUM_HIGHWAYS);
-    const angle = (lane * Math.PI * 2) / NUM_HIGHWAYS + (Math.random() - 0.5) * 0.4;
+    const lane = Math.floor(Math.random() * this.numLoadAgents);
+    const angle = (lane * Math.PI * 2) / this.numLoadAgents + (Math.random() - 0.5) * 0.4;
     const hitPos = new THREE.Vector3(
       Math.cos(angle) * 19.5,
       4.5 + Math.random() * 8,
@@ -694,6 +724,7 @@ export class CyberFortressDirector {
 
     const heat = this.smoothedHeat;
 
+    // Color of the fortress directly visualizes latency relative to SLA (Cool Blue -> Red)
     const thermalColor = new THREE.Color();
     if (heat < 0.33) {
       thermalColor.lerpColors(new THREE.Color(0x00f0ff), new THREE.Color(0xffb800), heat / 0.33);
@@ -726,14 +757,11 @@ export class CyberFortressDirector {
       ring.rotation.y += safeDt * speed * 0.75;
     });
 
-    this.thermalEdgeMaterials.forEach((mat) => {
-      mat.color.copy(thermalColor);
-    });
-    this.bastionPylons.forEach((mat) => {
-      mat.color.copy(thermalColor);
-    });
+    this.staticThermalEdgeMaterials.forEach((mat) => mat.color.copy(thermalColor));
+    this.dynamicThermalEdgeMaterials.forEach((mat) => mat.color.copy(thermalColor));
+    this.bastionPylons.forEach((mat) => mat.color.copy(thermalColor));
 
-    // Spin the 6 Load Agent Generator Cores & Accelerator Rings based on RPS
+    // Spin the N Load Agent Generator Cores & Accelerator Rings based on RPS
     const agentSpin = 1.2 + (this.smoothedRps / 2000) * 4.5;
     this.loadAgentCores.forEach((orb, idx) => {
       orb.rotation.y += safeDt * agentSpin;
@@ -760,7 +788,7 @@ export class CyberFortressDirector {
       ring.material.opacity = 0.25 + (wave * 0.5 + 0.5) * (0.28 + heat * 0.35);
     });
 
-    // 2. Update Highway Bot Swarms (Spawned from the 6 Load Agents at r=82 -> rushing into SUT at r=18)
+    // 2. Update Highway Bot Swarms across the N active Load Agent streams
     const activeHighwayCount = Math.min(
       MAX_HIGHWAY_BOTS,
       Math.max(45, Math.round((this.smoothedRps / 4500) * MAX_HIGHWAY_BOTS * 0.85 + (this.smoothedVus / 2500) * 250))
@@ -768,6 +796,7 @@ export class CyberFortressDirector {
     const botSpeed = 14 + Math.min(48, (this.smoothedRps / 4000) * 36);
     const dummy = new THREE.Object3D();
     const botColor = new THREE.Color();
+    const numLanes = Math.max(1, this.numLoadAgents);
 
     for (let i = 0; i < MAX_HIGHWAY_BOTS; i++) {
       if (i >= activeHighwayCount) {
@@ -779,10 +808,10 @@ export class CyberFortressDirector {
       }
 
       const b = this.highwayBots[i];
+      b.lane = i % numLanes;
       b.distance -= safeDt * botSpeed * b.speedFactor;
 
       if (b.distance <= 17.5) {
-        // Re-spawn at the Load Agent Emitter Portal (r = LOAD_AGENT_RADIUS - 3)
         b.distance = LOAD_AGENT_RADIUS - 3 - Math.random() * 4;
         b.isErrorBot = Math.random() * 100 < (this.currentFrame.errorRate || 0) * 1.4;
         if (b.isErrorBot && this.shockwaves.length < 18 && Math.random() < 0.35) {
@@ -790,7 +819,7 @@ export class CyberFortressDirector {
         }
       }
 
-      const angle = (b.lane * Math.PI * 2) / NUM_HIGHWAYS;
+      const angle = (b.lane * Math.PI * 2) / numLanes;
       const perpAngle = angle + Math.PI / 2;
       const x = Math.cos(angle) * b.distance + Math.cos(perpAngle) * b.laneOffset;
       const z = Math.sin(angle) * b.distance + Math.sin(perpAngle) * b.laneOffset;
@@ -928,8 +957,8 @@ export class CyberFortressDirector {
     }
 
     this.activeDirectorShotName = {
-      orbit: 'CAM-01 // ORBITAL SUT & LOAD AGENTS WIDE',
-      agents: 'CAM-02 // PERIMETER LOAD AGENT RING',
+      orbit: `CAM-01 // ORBITAL SUT & ${this.numLoadAgents} LOAD AGENTS`,
+      agents: `CAM-02 // PERIMETER LOAD AGENT RING (${this.numLoadAgents} RUNNERS)`,
       highway: 'CAM-03 // INGRESS BOTNET VECTOR',
       core: 'CAM-04 // SUT THERMAL REACTOR CORE',
       top: 'CAM-05 // TACTICAL HEX RADAR'
@@ -946,9 +975,8 @@ export class CyberFortressDirector {
       targetPos.set(52 * zoom, 11 + this.userElevationOffset * 18, sway);
       targetLook.set(0, 6.5, 0);
     } else if (activeShot === 'agents') {
-      // Positioned behind Load Agent 01 looking past the Load Agent spire straight toward the SUT
-      const agentIdx = Math.floor(this.clockTime / 4) % NUM_HIGHWAYS;
-      const angle = (agentIdx * Math.PI * 2) / NUM_HIGHWAYS + Math.sin(this.clockTime * 0.25) * 0.12;
+      const agentIdx = Math.floor(this.clockTime / 4) % Math.max(1, this.numLoadAgents);
+      const angle = (agentIdx * Math.PI * 2) / Math.max(1, this.numLoadAgents) + Math.sin(this.clockTime * 0.25) * 0.12;
       const dist = 98 * zoom;
       targetPos.set(Math.cos(angle) * dist, 19 + this.userElevationOffset * 18, Math.sin(angle) * dist);
       targetLook.set(0, 7, 0);
@@ -988,7 +1016,6 @@ export class CyberFortressDirector {
     ctx.clearRect(0, 0, W, H);
     ctx.drawImage(this.webglCanvas, 0, 0, W, H);
 
-    // Thermal Vignette Glow around screen edges when hot
     if (heat > 0.35) {
       const grad = ctx.createRadialGradient(W / 2, H / 2, H * 0.32, W / 2, H / 2, W * 0.58);
       const alpha = (heat - 0.35) * 0.42;
@@ -1000,20 +1027,23 @@ export class CyberFortressDirector {
 
     if (!this.showHudInCanvas) return;
 
-    // 1. Project 3D Labels: Central SUT Label + 6 Outer Load Agent Labels + 6 Gate Labels
-    this._draw3DAnchoredLabels(ctx, W, H, f, heat);
+    // 1. Project 3D Labels: Central SUT Label + N Outer Load Agent Labels + N Gate Labels
+    this._draw3DAnchoredLabels(ctx, W, H, f);
 
     // 2. Top Broadcast Header Bar
     ctx.save();
     ctx.fillStyle = 'rgba(5, 10, 22, 0.84)';
-    ctx.strokeStyle = 'rgba(0, 240, 255, 0.28)';
+    ctx.strokeStyle = this.isLiveMode ? 'rgba(255, 0, 76, 0.65)' : 'rgba(0, 240, 255, 0.28)';
     ctx.lineWidth = 1.5;
     ctx.beginPath();
     ctx.roundRect(36, 22, W - 72, 62, 8);
     ctx.fill();
     ctx.stroke();
 
-    ctx.fillStyle = this.thermal.colorHex;
+    // Pulsing dot (Red if LIVE VIEW, else thermal color)
+    ctx.fillStyle = this.isLiveMode
+      ? (Math.sin(this.clockTime * 8) > 0 ? '#ff004c' : '#ff6688')
+      : this.thermal.colorHex;
     ctx.beginPath();
     ctx.arc(64, 53, 8, 0, Math.PI * 2);
     ctx.fill();
@@ -1021,11 +1051,16 @@ export class CyberFortressDirector {
     ctx.font = '700 20px "Space Grotesk", "Inter", system-ui, sans-serif';
     ctx.fillStyle = '#ffffff';
     ctx.textAlign = 'left';
-    ctx.fillText(this.testTitle, 84, 48);
+    const titlePrefix = this.isLiveMode ? '🔴 LIVE STREAM // ' : '';
+    ctx.fillText(`${titlePrefix}${this.testTitle}`, 84, 48);
 
     ctx.font = '500 12px "JetBrains Mono", monospace';
     ctx.fillStyle = '#7da2c1';
-    ctx.fillText(`${this.sourceLabel}  ·  ${this.activeDirectorShotName}`, 84, 69);
+    ctx.fillText(
+      `${this.sourceLabel}  ·  ${this.numLoadAgents} LOAD AGENT${this.numLoadAgents > 1 ? 'S' : ''}  ·  ${this.activeDirectorShotName}`,
+      84,
+      69
+    );
 
     const badgeW = 350;
     ctx.fillStyle = heat > 0.65 ? 'rgba(255, 0, 68, 0.22)' : 'rgba(0, 240, 255, 0.1)';
@@ -1046,7 +1081,7 @@ export class CyberFortressDirector {
         label: 'TOTAL LOAD AGENTS SWARM',
         value: f.vus.toLocaleString(),
         unit: 'VUs',
-        sub: '6 LOAD AGENTS ACTIVE',
+        sub: `${this.numLoadAgents} ACTIVE LOAD AGENT RUNNER${this.numLoadAgents > 1 ? 'S' : ''}`,
         color: '#00f0ff'
       },
       {
@@ -1151,7 +1186,7 @@ export class CyberFortressDirector {
     // 5. Dedicated K6 Response Times (P50 / P95 / P99) & HTTP Errors Graph Panel
     this._drawResponseTimesAndErrorsGraph(ctx, W, H, f);
 
-    // 6. End-of-Test Summary Report Overlay (when test completes or user toggles Summary)
+    // 6. End-of-Test Summary Report Overlay
     if (this.showSummaryOverlay) {
       this._drawTestSummaryOverlay(ctx, W, H);
     }
@@ -1159,13 +1194,7 @@ export class CyberFortressDirector {
     ctx.restore();
   }
 
-  /**
-   * Projects 3D coordinates onto the 2D HUD for:
-   *  - Central SUT (System Under Test) Fortress Core Target Banner
-   *  - 6 Outer "Load Agent" Generator Badges (one per input stream)
-   *  - 6 Inner Fortress Gate Endpoint Badges
-   */
-  _draw3DAnchoredLabels(ctx, W, H, f, heat) {
+  _draw3DAnchoredLabels(ctx, W, H, f) {
     ctx.save();
 
     // A. Central SUT (System Under Test) Target Callout anchored above the Reactor Core
@@ -1185,7 +1214,6 @@ export class CyberFortressDirector {
         const boxW = Math.max(w1, w2) + 32;
         const boxH = 48;
 
-        // Vertical leader line down into the reactor core
         ctx.strokeStyle = this.thermal.colorHex;
         ctx.lineWidth = 1.6;
         ctx.beginPath();
@@ -1212,8 +1240,8 @@ export class CyberFortressDirector {
       }
     }
 
-    // B. 6 Outer "LOAD AGENT" Labels at the start of every input stream
-    const streamWeights = [0.22, 0.19, 0.18, 0.16, 0.14, 0.11];
+    // B. N Outer "LOAD AGENT" Labels at the start of every active input stream
+    const streamWeights = this._getAgentWeights(this.numLoadAgents);
     this.loadAgentWorldPositions.forEach((worldPos, idx) => {
       const proj = worldPos.clone().project(this.camera);
       if (proj.z > 1) return;
@@ -1221,12 +1249,16 @@ export class CyberFortressDirector {
       const sy = (-proj.y * 0.5 + 0.5) * H;
       if (sx < 340 || sx > W - 140 || sy < 95 || sy > H - 220) return;
 
-      const w = streamWeights[idx];
+      const w = streamWeights[idx] || 1 / this.numLoadAgents;
       const agentVus = Math.max(1, Math.round((f.vus || 0) * w));
       const agentRps = Math.round((f.rps || 0) * w);
+      const customRunner = this.loadAgentNames[idx];
       const epName = this.endpoints[idx % this.endpoints.length] || `/stream-${idx + 1}`;
 
-      const line1 = `⚡ LOAD AGENT 0${idx + 1}  [${agentVus} VUs · ${agentRps} req/s]`;
+      const agentTitle = customRunner
+        ? `⚡ LOAD AGENT ${String(idx + 1).padStart(2, '0')} (${customRunner.slice(0, 12)})`
+        : `⚡ LOAD AGENT ${String(idx + 1).padStart(2, '0')}`;
+      const line1 = `${agentTitle}  [${agentVus} VUs · ${agentRps} req/s]`;
       const line2 = `STREAM → ${epName}`;
 
       ctx.font = '700 11px "JetBrains Mono", monospace';
@@ -1250,7 +1282,7 @@ export class CyberFortressDirector {
       ctx.fillText(line2, sx, sy + 12);
     });
 
-    // C. 6 Inner SUT Gate Labels
+    // C. N Inner SUT Gate Labels
     ctx.font = '600 11px "JetBrains Mono", monospace';
     this.gateWorldPositions.forEach((worldPos, idx) => {
       const projected = worldPos.clone().add(new THREE.Vector3(0, 9.5, 0)).project(this.camera);
@@ -1260,7 +1292,7 @@ export class CyberFortressDirector {
       if (sx < 340 || sx > W - 140 || sy < 100 || sy > H - 220) return;
 
       const epName = this.endpoints[idx % this.endpoints.length] || `GATE-0${idx + 1}`;
-      const label = `SUT GATE 0${idx + 1}: ${epName}`;
+      const label = `SUT GATE ${String(idx + 1).padStart(2, '0')}: ${epName}`;
       const textWidth = ctx.measureText(label).width;
 
       ctx.fillStyle = 'rgba(4, 10, 22, 0.78)';
@@ -1279,10 +1311,6 @@ export class CyberFortressDirector {
     ctx.restore();
   }
 
-  /**
-   * Draws a dedicated, multi-series K6 Response Times (P50, P95, P99 in ms)
-   * and HTTP Errors (`http_req_failed` % & count/s) dual-axis graph at the bottom of the canvas.
-   */
   _drawResponseTimesAndErrorsGraph(ctx, W, H, f) {
     const panelX = 36;
     const panelY = H - 188;
@@ -1298,17 +1326,16 @@ export class CyberFortressDirector {
     ctx.fill();
     ctx.stroke();
 
-    // Header Row inside Graph Panel
     ctx.font = '700 13px "JetBrains Mono", monospace';
     ctx.fillStyle = '#ffffff';
     ctx.textAlign = 'left';
+    const modeTag = this.isLiveMode ? '🔴 LIVE TELEMETRY STREAM' : `T+${formatElapsed(f.elapsedSec)}`;
     ctx.fillText(
-      `📈 K6 RESPONSE TIMES (MS) & HTTP ERRORS GRAPH  —  T+${formatElapsed(f.elapsedSec)}`,
+      `📈 K6 RESPONSE TIMES (MS) & HTTP ERRORS GRAPH  —  ${modeTag}`,
       panelX + 18,
       panelY + 24
     );
 
-    // Live Legend Badges in Header Row
     const legendItems = [
       { text: `━ P50: ${f.p50}ms`, color: '#00f0ff' },
       { text: `━ P95: ${f.p95}ms`, color: '#ff6b00' },
@@ -1326,7 +1353,6 @@ export class CyberFortressDirector {
       lx -= ctx.measureText(item.text).width + 26;
     }
 
-    // Plot Area Dimensions
     const plotLeft = panelX + 74;
     const plotRight = panelX + panelW - 76;
     const plotTop = panelY + 38;
@@ -1345,7 +1371,6 @@ export class CyberFortressDirector {
     );
     const maxErrPct = Math.max(5, ...this.allFrames.map((fr) => fr.errorRate || 0)) * 1.15;
 
-    // Horizontal Gridlines & Left Y-Axis Labels (Response Time in ms) + Right Y-Axis Labels (Error Rate %)
     ctx.lineWidth = 1;
     ctx.font = '500 10px "JetBrains Mono", monospace';
     const gridSteps = 3;
@@ -1358,20 +1383,17 @@ export class CyberFortressDirector {
       ctx.lineTo(plotRight, gy);
       ctx.stroke();
 
-      // Left Axis: Response Time (ms)
       const msVal = Math.round(ratio * maxLatencyMs);
       ctx.fillStyle = '#8aa8c7';
       ctx.textAlign = 'right';
       ctx.fillText(`${msVal}ms`, plotLeft - 8, gy + 3);
 
-      // Right Axis: Error Rate (%)
       const errVal = (ratio * maxErrPct).toFixed(1);
       ctx.fillStyle = '#ff6b8b';
       ctx.textAlign = 'left';
       ctx.fillText(`${errVal}%`, plotRight + 8, gy + 3);
     }
 
-    // Critical SLA Threshold Dashed Reference Line
     if (this.thresholds.criticalMs < maxLatencyMs) {
       const critY = plotBottom - (this.thresholds.criticalMs / maxLatencyMs) * plotH;
       ctx.save();
@@ -1387,7 +1409,6 @@ export class CyberFortressDirector {
     const count = this.allFrames.length;
     const barW = Math.max(2, plotW / count - 1);
 
-    // 1. Draw HTTP Error Bars (`http_req_failed` %) along the graph
     this.allFrames.forEach((fr, idx) => {
       if (!fr.errorRate || fr.errorRate <= 0) return;
       const px = plotLeft + (idx / (count - 1)) * plotW;
@@ -1398,7 +1419,6 @@ export class CyberFortressDirector {
       ctx.fillRect(px - barW / 2, plotBottom - barH, barW, 2);
     });
 
-    // 2. Draw P95 Response Time Area Fill & Line (`http_req_duration` P95)
     const p95Grad = ctx.createLinearGradient(0, plotTop, 0, plotBottom);
     p95Grad.addColorStop(0, 'rgba(255, 107, 0, 0.34)');
     p95Grad.addColorStop(1, 'rgba(255, 107, 0, 0.02)');
@@ -1416,7 +1436,6 @@ export class CyberFortressDirector {
     ctx.fillStyle = p95Grad;
     ctx.fill();
 
-    // P99 Dashed Violet Line
     ctx.save();
     ctx.setLineDash([4, 3]);
     ctx.strokeStyle = '#c084fc';
@@ -1431,7 +1450,6 @@ export class CyberFortressDirector {
     ctx.stroke();
     ctx.restore();
 
-    // P95 Bold Thermal Orange Line
     ctx.strokeStyle = '#ff6b00';
     ctx.lineWidth = 2.5;
     ctx.beginPath();
@@ -1443,7 +1461,6 @@ export class CyberFortressDirector {
     });
     ctx.stroke();
 
-    // P50 Median Cyan Line
     ctx.strokeStyle = '#00f0ff';
     ctx.lineWidth = 2.0;
     ctx.beginPath();
@@ -1455,7 +1472,6 @@ export class CyberFortressDirector {
     });
     ctx.stroke();
 
-    // Playhead Scanner Line & Dots
     const progress = Math.min(1, Math.max(0, (f.index || 0) / Math.max(1, count - 1)));
     const playheadX = plotLeft + progress * plotW;
 
@@ -1466,7 +1482,6 @@ export class CyberFortressDirector {
     ctx.lineTo(playheadX, plotBottom + 4);
     ctx.stroke();
 
-    // Highlight current P95 and Error points on playhead
     const curP95Y = plotBottom - (Math.min(maxLatencyMs, f.p95 || 0) / maxLatencyMs) * plotH;
     ctx.fillStyle = '#ff6b00';
     ctx.beginPath();
@@ -1484,10 +1499,6 @@ export class CyberFortressDirector {
     ctx.restore();
   }
 
-  /**
-   * Renders the End-of-Test Executive Summary Report Overlay directly on the canvas
-   * when the test execution completes (or when toggled by the user).
-   */
   _drawTestSummaryOverlay(ctx, W, H) {
     if (!this.summaryStats) {
       this.summaryStats = this._computeSummaryStats();
@@ -1497,12 +1508,11 @@ export class CyberFortressDirector {
 
     ctx.save();
 
-    // Dimmed Tactical Backdrop over the 3D scene (keeping the graph visible below or framing nicely)
     ctx.fillStyle = 'rgba(3, 8, 18, 0.84)';
     ctx.fillRect(0, 0, W, H);
 
     const cardW = 1180;
-    const cardH = 660;
+    const cardH = 680;
     const cx = (W - cardW) / 2;
     const cy = (H - cardH) / 2 - 20;
 
@@ -1514,7 +1524,6 @@ export class CyberFortressDirector {
     ctx.fill();
     ctx.stroke();
 
-    // Header Banner
     ctx.fillStyle = 'rgba(0, 240, 255, 0.08)';
     ctx.fillRect(cx + 2, cy + 2, cardW - 4, 82);
 
@@ -1526,12 +1535,11 @@ export class CyberFortressDirector {
     ctx.font = '600 13px "JetBrains Mono", monospace';
     ctx.fillStyle = '#8aa8c7';
     ctx.fillText(
-      `TARGET: ${this.sutName}  ·  DURATION: ${formatElapsed(s.durationSec)}  ·  6 LOAD AGENTS`,
+      `TARGET: ${this.sutName}  ·  DURATION: ${formatElapsed(s.durationSec)}  ·  ${this.numLoadAgents} LOAD AGENT RUNNER${this.numLoadAgents > 1 ? 'S' : ''}`,
       cx + 32,
       cy + 66
     );
 
-    // Verdict Badge on Top Right of Summary Card
     ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
     ctx.strokeStyle = s.verdictColor;
     ctx.lineWidth = 1.8;
@@ -1545,7 +1553,6 @@ export class CyberFortressDirector {
     ctx.textAlign = 'center';
     ctx.fillText(s.verdict, cx + cardW - 221, cy + 47);
 
-    // 6 Executive Aggregate KPI Boxes
     const kpis = [
       {
         label: 'TOTAL HTTP REQUESTS',
@@ -1556,7 +1563,7 @@ export class CyberFortressDirector {
       {
         label: 'PEAK LOAD AGENT SWARM',
         val: `${s.maxVus.toLocaleString()} VUs`,
-        sub: 'DISTRIBUTED ACROSS 6 STREAMS',
+        sub: `ACROSS ${this.numLoadAgents} LOAD AGENT RUNNER${this.numLoadAgents > 1 ? 'S' : ''}`,
         color: '#38bdf8'
       },
       {
@@ -1618,15 +1625,18 @@ export class CyberFortressDirector {
       ctx.fillText(k.sub, bx + 18, by + 86);
     });
 
-    // Per-Load-Agent Breakdown Table (6 Load Agents -> SUT Endpoints)
     const tableY = cy + 362;
     ctx.font = '700 14px "JetBrains Mono", monospace';
     ctx.fillStyle = '#00f0ff';
     ctx.textAlign = 'left';
-    ctx.fillText('⚡ INPUT STREAM LOAD AGENTS BREAKDOWN (LOAD AGENT 01 → 06)', cx + 32, tableY);
+    ctx.fillText(
+      `⚡ ACTIVE LOAD AGENT RUNNERS BREAKDOWN (${this.numLoadAgents} RUNNER${this.numLoadAgents > 1 ? 'S' : ''} USED)`,
+      cx + 32,
+      tableY
+    );
 
     const headers = ['LOAD AGENT', 'SUT TARGET ENDPOINT', 'PEAK VUs', 'PEAK RPS', 'TOTAL REQS', 'AVG P95', 'ERROR %'];
-    const colOffsets = [32, 210, 540, 670, 810, 960, 1070];
+    const colOffsets = [32, 240, 540, 670, 810, 960, 1070];
 
     ctx.fillStyle = 'rgba(0, 240, 255, 0.12)';
     ctx.fillRect(cx + 28, tableY + 12, cardW - 56, 30);
@@ -1637,11 +1647,14 @@ export class CyberFortressDirector {
       ctx.fillText(h, cx + colOffsets[i], tableY + 32);
     });
 
-    s.agentBreakdown.forEach((ag, rIdx) => {
-      const ry = tableY + 64 + rIdx * 34;
+    const visibleRows = s.agentBreakdown.slice(0, 7);
+    const rowStep = visibleRows.length > 6 ? 29 : 34;
+
+    visibleRows.forEach((ag, rIdx) => {
+      const ry = tableY + 62 + rIdx * rowStep;
       if (rIdx % 2 === 1) {
         ctx.fillStyle = 'rgba(255, 255, 255, 0.03)';
-        ctx.fillRect(cx + 28, ry - 20, cardW - 56, 32);
+        ctx.fillRect(cx + 28, ry - 18, cardW - 56, rowStep - 2);
       }
 
       ctx.font = '600 12px "JetBrains Mono", monospace';
