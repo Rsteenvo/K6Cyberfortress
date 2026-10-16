@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>K6 CYBER-FORTRESS // InfluxDB 1.8 Telemetry Cinema</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;600;700;800&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <!-- Top Command Navigation -->
+    <header class="top-nav">
+      <div class="brand-group">
+        <div class="brand-emblem" aria-hidden="true">K6</div>
+        <div>
+          <h1 class="brand-title">K6 Cyber-Fortress Cinema</h1>
+          <p class="brand-subtitle" id="connection-status-text">SOURCE: BUILT-IN K6 TELEMETRY · 1080P 60FPS DETERMINISTIC ENGINE</p>
+        </div>
+      </div>
+
+      <div class="toolbar-controls">
+        <div class="control-pill">
+          <label for="scenario-select">SCENARIO:</label>
+          <select id="scenario-select" aria-label="Select k6 test scenario">
+            <option value="citadel_siege">Operation Citadel Siege (2.5k VUs · Thermal Meltdown)</option>
+            <option value="ddos_tsunami">Botnet Tsunami (6k VUs · Circuit Breaker Trip)</option>
+            <option value="endurance_pulse">Micro-Burst Soak (1.5k VUs · Cache Stampede)</option>
+          </select>
+        </div>
+
+        <button type="button" class="btn" id="toggle-summary-btn" title="View or hide End-of-Test Executive Summary">
+          📊 Test Summary
+        </button>
+
+        <button type="button" class="btn btn-primary" id="open-influx-btn">
+          ⚡ Connect InfluxDB 1.8 / Grafana
+        </button>
+
+        <button type="button" class="btn btn-movie" id="generate-movie-btn" title="Rewind to start, play full test + end summary, and export 1080p WebM movie">
+          🎬 Generate Full Movie (.webm)
+        </button>
+      </div>
+    </header>
+
+    <!-- Main 3D + Broadcast HUD Stage -->
+    <main class="viewport-stage">
+      <div class="camera-dock" role="toolbar" aria-label="Camera Director Angles">
+        <button type="button" class="cam-btn active" data-cam="auto">🎥 AUTO DIRECTOR</button>
+        <button type="button" class="cam-btn" data-cam="orbit">ORBIT WIDE</button>
+        <button type="button" class="cam-btn" data-cam="agents">LOAD AGENTS</button>
+        <button type="button" class="cam-btn" data-cam="highway">BOTNET HIGHWAY</button>
+        <button type="button" class="cam-btn" data-cam="core">SUT CORE</button>
+        <button type="button" class="cam-btn" data-cam="top">HEX RADAR</button>
+      </div>
+
+      <div class="canvas-frame">
+        <canvas id="cinema-canvas" width="1920" height="1080" aria-label="3D Cyber-Fortress k6 test execution visualizer"></canvas>
+      </div>
+    </main>
+
+    <!-- Bottom Playback & Scrubber Transport Deck -->
+    <footer class="transport-deck">
+      <div class="transport-buttons">
+        <button type="button" class="btn" id="play-pause-btn" aria-label="Play or pause playback">⏸ PAUSE</button>
+        <button type="button" class="btn" id="restart-btn" aria-label="Restart from beginning">⏮ REWIND</button>
+      </div>
+
+      <div class="scrubber-container">
+        <label for="timeline-slider" class="time-readout" id="time-readout">00:00 / 02:00</label>
+        <input
+          type="range"
+          id="timeline-slider"
+          min="0"
+          max="120"
+          step="1"
+          value="0"
+          aria-label="Test execution timeline scrubber"
+        />
+      </div>
+
+      <div class="toolbar-controls">
+        <div class="control-pill">
+          <label for="speed-select">SPEED:</label>
+          <select id="speed-select" aria-label="Playback speed multiplier">
+            <option value="1">1x (Real-Time)</option>
+            <option value="2">2x</option>
+            <option value="4" selected>4x (Cinema)</option>
+            <option value="8">8x (Fast)</option>
+            <option value="15">15x (Blitz)</option>
+          </select>
+        </div>
+
+        <button type="button" class="btn" id="record-clip-btn">⏺ Record Clip</button>
+      </div>
+    </footer>
+  </div>
+
+  <!-- InfluxDB 1.8 & SLA Configuration Modal Dialog (using declarative closedby="any" + JS fallback) -->
+  <dialog id="influx-dialog" closedby="any" aria-labelledby="influx-dialog-title">
+    <div class="dialog-header">
+      <h2 id="influx-dialog-title">⚡ INFLUXDB 1.8 / GRAFANA K6 DATA SOURCE</h2>
+      <button type="button" class="btn" id="close-influx-btn" aria-label="Close dialog">✕</button>
+    </div>
+
+    <form id="influx-form" method="dialog">
+      <div class="form-grid">
+        <div class="form-field full-width">
+          <label for="influx-url">InfluxDB 1.8 HTTP Endpoint (or Grafana Datasource Proxy URL)</label>
+          <input
+            type="url"
+            id="influx-url"
+            value="http://localhost:8086"
+            placeholder="http://localhost:8086 or http://localhost:3000/api/datasources/proxy/1"
+            required
+          />
+        </div>
+
+        <div class="form-field">
+          <label for="influx-db">Database Name (k6 `--out influxdb=...`)</label>
+          <input type="text" id="influx-db" value="k6" placeholder="k6" required />
+        </div>
+
+        <div class="form-field">
+          <label for="sut-name-input">SUT (System Under Test) Label</label>
+          <input type="text" id="sut-name-input" value="SUT // CORE-API-CLUSTER" placeholder="SUT // CORE-API-CLUSTER" />
+        </div>
+
+        <div class="form-field">
+          <label for="influx-bucket">Time Group Bucket Resolution</label>
+          <select id="influx-bucket">
+            <option value="1s">1s (High Resolution)</option>
+            <option value="2s" selected>2s (Recommended)</option>
+            <option value="5s">5s (Long Soak Tests)</option>
+            <option value="10s">10s (Multi-Hour Runs)</option>
+          </select>
+        </div>
+
+        <div class="form-field">
+          <label for="influx-user">Username (Optional)</label>
+          <input type="text" id="influx-user" placeholder="admin" autocomplete="username" />
+        </div>
+
+        <div class="form-field">
+          <label for="influx-pass">Password / API Token (Optional)</label>
+          <input type="password" id="influx-pass" placeholder="••••••••" autocomplete="current-password" />
+        </div>
+
+        <div class="form-field">
+          <label for="influx-time-mode">Test Window Selection</label>
+          <select id="influx-time-mode">
+            <option value="auto_latest" selected>Auto-Detect Latest Test Run</option>
+            <option value="relative">Relative Lookback Window</option>
+            <option value="custom">Custom Start / End Time</option>
+          </select>
+        </div>
+
+        <div class="form-field" id="relative-window-group">
+          <label for="influx-relative">Relative Time Window</label>
+          <select id="influx-relative">
+            <option value="15m">Last 15 Minutes</option>
+            <option value="1h" selected>Last 1 Hour</option>
+            <option value="6h">Last 6 Hours</option>
+            <option value="24h">Last 24 Hours</option>
+            <option value="7d">Last 7 Days</option>
+          </select>
+        </div>
+
+        <div class="form-field full-width" id="custom-time-group" style="display: none;">
+          <label for="influx-start-iso">Custom ISO Time Range (Start → End)</label>
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.6rem;">
+            <input type="datetime-local" id="influx-start-iso" />
+            <input type="datetime-local" id="influx-end-iso" />
+          </div>
+        </div>
+
+        <div class="form-field full-width">
+          <label for="influx-tag-filter">Optional InfluxQL Tag Filter (e.g. `"testid" = 'run-42'` or `"name" =~ /checkout/`)</label>
+          <input type="text" id="influx-tag-filter" placeholder="Leave blank for all traffic in window" />
+        </div>
+
+        <!-- Thermal SLA Thresholds -->
+        <div class="form-field">
+          <label for="sla-nominal">Cryo-Nominal P95 Threshold (ms)</label>
+          <input type="number" id="sla-nominal" value="180" min="10" max="10000" />
+        </div>
+
+        <div class="form-field">
+          <label for="sla-critical">Core Meltdown P95 Threshold (ms)</label>
+          <input type="number" id="sla-critical" value="1100" min="50" max="60000" />
+        </div>
+
+        <div class="form-field full-width">
+          <label for="json-file-import">Or Import Saved InfluxDB JSON / k6 Summary JSON</label>
+          <input type="file" id="json-file-import" accept=".json" />
+        </div>
+      </div>
+
+      <div class="status-banner" id="influx-status-banner">
+        Ready to query InfluxDB 1.8 measurements: <code>vus</code>, <code>http_reqs</code>, <code>http_req_duration</code> (p50/p95/p99), and <code>http_req_failed</code>.
+      </div>
+
+      <div class="dialog-actions">
+        <button type="button" class="btn" id="test-connection-btn">🔍 Scan & Verify DB</button>
+        <div style="display: flex; gap: 0.6rem;">
+          <button type="button" class="btn" id="apply-sla-only-btn">Apply SLA Thresholds</button>
+          <button type="button" class="btn btn-primary" id="load-influx-run-btn">🚀 Load Test & Build Movie</button>
+        </div>
+      </div>
+    </form>
+  </dialog>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

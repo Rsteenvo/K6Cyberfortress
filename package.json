@@ -1,0 +1,9 @@
+{
+  "name": "k6-cyber-fortress",
+  "version": "1.0.0",
+  "description": "3D Cyber-Fortress Telemetry Cinema & Movie Generator for k6 + InfluxDB 1.8",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  }
+}
