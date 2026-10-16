@@ -17,29 +17,20 @@
         <div class="brand-emblem" aria-hidden="true">K6</div>
         <div>
           <h1 class="brand-title">K6 Cyber-Fortress Cinema</h1>
-          <p class="brand-subtitle" id="connection-status-text">SOURCE: BUILT-IN K6 TELEMETRY · 1080P 60FPS DETERMINISTIC ENGINE</p>
+          <p class="brand-subtitle" id="connection-status-text">STATUS: NO DATA · CONNECT INFLUXDB 1.8 / GRAFANA</p>
         </div>
       </div>
 
       <div class="toolbar-controls">
-        <div class="control-pill">
-          <label for="scenario-select">SCENARIO:</label>
-          <select id="scenario-select" aria-label="Select k6 test scenario">
-            <option value="citadel_siege">Operation Citadel Siege (2.5k VUs · Thermal Meltdown)</option>
-            <option value="ddos_tsunami">Botnet Tsunami (6k VUs · Circuit Breaker Trip)</option>
-            <option value="endurance_pulse">Micro-Burst Soak (1.5k VUs · Cache Stampede)</option>
-          </select>
-        </div>
-
         <div class="control-pill" title="Number of 3D Load Agents (Runners) in the visualization">
           <label for="runner-count-select">LOAD AGENTS:</label>
           <select id="runner-count-select" aria-label="Number of Load Agent Runners">
-            <option value="auto">Auto (From DB)</option>
+            <option value="auto" selected>Auto (From DB)</option>
             <option value="1">1 Load Agent</option>
             <option value="2">2 Load Agents</option>
             <option value="3">3 Load Agents</option>
             <option value="4">4 Load Agents</option>
-            <option value="6" selected>6 Load Agents</option>
+            <option value="6">6 Load Agents</option>
             <option value="8">8 Load Agents</option>
             <option value="10">10 Load Agents</option>
             <option value="12">12 Load Agents</option>
@@ -64,19 +55,80 @@
       </div>
     </header>
 
-    <!-- Main 3D + Broadcast HUD Stage -->
+    <!-- Main Viewport Stage: Left Response Times Table + Right 3D Animation -->
     <main class="viewport-stage">
-      <div class="camera-dock" role="toolbar" aria-label="Camera Director Angles">
-        <button type="button" class="cam-btn active" data-cam="auto">🎥 AUTO DIRECTOR</button>
-        <button type="button" class="cam-btn" data-cam="orbit">ORBIT WIDE</button>
-        <button type="button" class="cam-btn" data-cam="agents">LOAD AGENTS</button>
-        <button type="button" class="cam-btn" data-cam="highway">BOTNET HIGHWAY</button>
-        <button type="button" class="cam-btn" data-cam="core">SUT CORE</button>
-        <button type="button" class="cam-btn" data-cam="top">HEX RADAR</button>
-      </div>
+      <aside class="response-table-sidebar" aria-label="Actual k6 Response Times Table">
+        <!-- Table 1: Actual Response Times by Endpoint / Request -->
+        <section class="sidebar-section" style="max-height: 44%;">
+          <div class="sidebar-header">
+            <h2 class="sidebar-title">⏱ Actual Response Times (by Request)</h2>
+            <span class="sidebar-badge" id="rt-current-time-badge">NO DATA</span>
+          </div>
+          <div class="table-scroll">
+            <table class="rt-table" aria-label="Response times by request endpoint">
+              <thead>
+                <tr>
+                  <th>REQUEST</th>
+                  <th>RPS</th>
+                  <th>AVG</th>
+                  <th>P50</th>
+                  <th>P95</th>
+                  <th>P99</th>
+                  <th>MAX</th>
+                </tr>
+              </thead>
+              <tbody id="rt-endpoint-tbody">
+                <tr>
+                  <td colspan="7" class="rt-empty">NO DATA — Connect InfluxDB 1.8</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
 
-      <div class="canvas-frame">
-        <canvas id="cinema-canvas" width="1920" height="1080" aria-label="3D Cyber-Fortress k6 test execution visualizer"></canvas>
+        <!-- Table 2: Time-Series Actual Response Time Log -->
+        <section class="sidebar-section grow">
+          <div class="sidebar-header">
+            <h2 class="sidebar-title">📋 Actual Response Times Log (Timeline)</h2>
+            <span class="sidebar-badge" id="rt-bucket-count-badge">0 PTS</span>
+          </div>
+          <div class="table-scroll" id="rt-timeline-scroll">
+            <table class="rt-table" aria-label="Timeline log of actual k6 response times">
+              <thead>
+                <tr>
+                  <th>TIME</th>
+                  <th>VUs</th>
+                  <th>RPS</th>
+                  <th>AVG</th>
+                  <th>P50</th>
+                  <th>P95</th>
+                  <th>P99</th>
+                  <th>ERR%</th>
+                </tr>
+              </thead>
+              <tbody id="rt-timeline-tbody">
+                <tr>
+                  <td colspan="8" class="rt-empty">NO DATA — Connect InfluxDB 1.8</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </aside>
+
+      <div class="canvas-stage-wrapper">
+        <div class="camera-dock" role="toolbar" aria-label="Camera Director Angles">
+          <button type="button" class="cam-btn active" data-cam="auto">🎥 AUTO DIRECTOR</button>
+          <button type="button" class="cam-btn" data-cam="orbit">ORBIT WIDE</button>
+          <button type="button" class="cam-btn" data-cam="agents">LOAD AGENTS</button>
+          <button type="button" class="cam-btn" data-cam="highway">BOTNET HIGHWAY</button>
+          <button type="button" class="cam-btn" data-cam="core">SUT CORE</button>
+          <button type="button" class="cam-btn" data-cam="top">HEX RADAR</button>
+        </div>
+
+        <div class="canvas-frame">
+          <canvas id="cinema-canvas" width="1920" height="1080" aria-label="3D Cyber-Fortress k6 test execution visualizer"></canvas>
+        </div>
       </div>
     </main>
 

@@ -174,16 +174,146 @@ body {
   50% { box-shadow: 0 0 24px rgba(255, 0, 76, 1); }
 }
 
-/* Main Viewport Stage */
+/* Main Viewport Stage: Left Response Times Table + Right 3D Animation Stage */
 .viewport-stage {
+  position: relative;
+  display: grid;
+  grid-template-columns: 430px 1fr;
+  gap: 0.85rem;
+  align-items: stretch;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  padding: 0.65rem 1rem;
+}
+
+.response-table-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  background: var(--bg-panel);
+  border: 1px solid rgba(0, 240, 255, 0.28);
+  border-radius: 10px;
+  padding: 0.85rem;
+  overflow: hidden;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.65);
+}
+
+.sidebar-section {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.sidebar-section.grow {
+  flex: 1;
+}
+
+.sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 0.45rem;
+  margin-bottom: 0.45rem;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.sidebar-title {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  font-weight: 700;
+  color: var(--cyan);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.sidebar-badge {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  padding: 0.15rem 0.45rem;
+  border-radius: 4px;
+  background: rgba(0, 240, 255, 0.12);
+  color: var(--text-main);
+  border: 1px solid var(--border-cyan);
+}
+
+.table-scroll {
+  overflow-y: auto;
+  overflow-x: auto;
+  flex: 1;
+  border-radius: 6px;
+  border: 1px solid rgba(125, 162, 193, 0.14);
+  background: rgba(4, 9, 20, 0.75);
+}
+
+.rt-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  text-align: right;
+}
+
+.rt-table th,
+.rt-table td {
+  padding: 0.42rem 0.5rem;
+  border-bottom: 1px solid rgba(125, 162, 193, 0.1);
+  white-space: nowrap;
+}
+
+.rt-table th:first-child,
+.rt-table td:first-child {
+  text-align: left;
+  max-width: 145px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rt-table thead th {
+  position: sticky;
+  top: 0;
+  background: #081529;
+  color: var(--text-muted);
+  font-weight: 700;
+  font-size: 0.68rem;
+  z-index: 2;
+  border-bottom: 1px solid var(--border-cyan);
+}
+
+.rt-table tbody tr {
+  transition: background 0.12s;
+}
+
+.rt-table tbody tr:hover {
+  background: rgba(0, 240, 255, 0.08);
+}
+
+.rt-table tbody tr.active-row {
+  background: rgba(0, 240, 255, 0.18);
+  box-shadow: inset 3px 0 0 var(--cyan);
+}
+
+.rt-table tbody tr.aggregate-row {
+  background: rgba(0, 240, 255, 0.1);
+  font-weight: 700;
+}
+
+.rt-empty {
+  text-align: center !important;
+  color: var(--text-muted);
+  padding: 1.5rem 0.5rem !important;
+}
+
+.canvas-stage-wrapper {
   position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
   width: 100%;
   height: 100%;
+  min-width: 0;
   overflow: hidden;
-  padding: 0.6rem 1rem;
 }
 
 .canvas-frame {
@@ -213,7 +343,7 @@ body {
 /* Floating Camera Director Switcher */
 .camera-dock {
   position: absolute;
-  top: 1.35rem;
+  top: 0.85rem;
   left: 50%;
   transform: translateX(-50%);
   display: flex;

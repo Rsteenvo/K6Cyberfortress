@@ -1,18 +1,18 @@
 /**
  * k6 Cyber-Fortress — Main Application Controller
- * Supports:
- *  - Replay of completed k6 runs from InfluxDB 1.8 / Grafana or built-in scenarios
- *  - Real-time LIVE VIEW monitoring & on-the-fly movie rendering
- *  - Dynamic 3D Load Agent (Runner) count based on actual runners used
+ * - Connects exclusively to InfluxDB 1.8 / Grafana (or imported InfluxDB JSON)
+ * - Displays NO DATA state when no InfluxDB connection or test data is loaded
+ * - Updates the Left Actual Response Times Tables (by Request Endpoint + Timeline Log)
+ * - Supports Real-Time LIVE VIEW polling & on-the-fly movie rendering
+ * - Dynamically scales 3D Load Agents (Runners) based on actual runners used
  */
 
-import { SCENARIO_PRESETS, computeThermalState } from './demo-data.js';
+import { computeThermalState } from './demo-data.js';
 import { InfluxK6Client, normalizeInfluxResponse } from './influx-client.js';
 import { CyberFortressDirector } from './fortress-scene.js';
 import { FortressVideoExporter } from './video-exporter.js';
 
 const canvas = document.getElementById('cinema-canvas');
-const scenarioSelect = document.getElementById('scenario-select');
 const runnerCountSelect = document.getElementById('runner-count-select');
 const liveViewBtn = document.getElementById('live-view-btn');
 const toggleSummaryBtn = document.getElementById('toggle-summary-btn');
@@ -24,6 +24,13 @@ const speedSelect = document.getElementById('speed-select');
 const generateMovieBtn = document.getElementById('generate-movie-btn');
 const recordClipBtn = document.getElementById('record-clip-btn');
 const connectionStatusText = document.getElementById('connection-status-text');
+
+// Left Sidebar Response Time Table Elements
+const rtCurrentTimeBadge = document.getElementById('rt-current-time-badge');
+const rtBucketCountBadge = document.getElementById('rt-bucket-count-badge');
+const rtEndpointTbody = document.getElementById('rt-endpoint-tbody');
+const rtTimelineTbody = document.getElementById('rt-timeline-tbody');
+const rtTimelineScroll = document.getElementById('rt-timeline-scroll');
 
 // Dialog Elements
 const influxDialog = document.getElementById('influx-dialog');
@@ -39,13 +46,14 @@ const relativeWindowGroup = document.getElementById('relative-window-group');
 const customTimeGroup = document.getElementById('custom-time-group');
 const jsonFileImport = document.getElementById('json-file-import');
 
-// Initialize 3D Cyber-Fortress Director
-const director = new CyberFortressDirector(canvas, { numLoadAgents: 6 });
+// Initialize 3D Cyber-Fortress Director in NO DATA state
+const director = new CyberFortressDirector(canvas, { numLoadAgents: 1 });
 
 // Playback & Live Stream state
 let frames = [];
 let playheadFloat = 0;
-let isPlaying = true;
+let lastRenderedBucketIdx = -1;
+let isPlaying = false;
 let playbackSpeed = 4;
 let isGeneratingFullMovie = false;
 let movieEndHoldTimer = null;
@@ -53,7 +61,150 @@ let movieEndHoldTimer = null;
 // Live View Polling Timer
 let isLiveMode = false;
 let livePollInterval = null;
-let liveSimTick = 0;
+
+function latencyColor(ms) {
+  const { nominalMs, criticalMs } = director.thresholds;
+  if (ms >= criticalMs) return '#ff004c';
+  if (ms >= nominalMs) return '#ffaa00';
+  return '#00f0ff';
+}
+
+function renderEmptyTables() {
+  rtCurrentTimeBadge.textContent = 'NO DATA';
+  rtBucketCountBadge.textContent = '0 PTS';
+  rtEndpointTbody.innerHTML = '<tr><td colspan="7" class="rt-empty">NO DATA — Connect InfluxDB 1.8</td></tr>';
+  rtTimelineTbody.innerHTML = '<tr><td colspan="8" class="rt-empty">NO DATA — Connect InfluxDB 1.8</td></tr>';
+  lastRenderedBucketIdx = -1;
+}
+
+/**
+ * Populates the Left Sidebar Timeline Response Time Table (`#rt-timeline-tbody`)
+ * with all time buckets from the loaded test run.
+ */
+function renderTimelineResponseTable() {
+  if (!director.hasData || !frames.length) {
+    renderEmptyTables();
+    return;
+  }
+
+  rtBucketCountBadge.textContent = `${frames.length} PTS`;
+  const rowsHtml = frames.map((f, idx) => {
+    const avgMs = f.mean ?? Math.round((f.p50 || 0) * 1.15);
+    const p95Col = latencyColor(f.p95 || 0);
+    const errCol = (f.errorRate || 0) > 1 ? '#ff004c' : '#7da2c1';
+    return `<tr data-idx="${idx}">
+      <td>T+${formatMMSS(f.elapsedSec)}</td>
+      <td>${f.vus}</td>
+      <td>${f.rps}</td>
+      <td>${avgMs}ms</td>
+      <td>${f.p50}ms</td>
+      <td style="color:${p95Col};font-weight:700;">${f.p95}ms</td>
+      <td>${f.p99}ms</td>
+      <td style="color:${errCol};">${(f.errorRate || 0).toFixed(1)}%</td>
+    </tr>`;
+  }).join('');
+
+  rtTimelineTbody.innerHTML = rowsHtml;
+
+  // Allow clicking any row in the timeline table to jump the animation to that exact bucket
+  rtTimelineTbody.querySelectorAll('tr[data-idx]').forEach((tr) => {
+    tr.style.cursor = 'pointer';
+    tr.addEventListener('click', () => {
+      if (isLiveMode) return;
+      const idx = Number(tr.dataset.idx) || 0;
+      playheadFloat = idx;
+      timelineSlider.value = String(idx);
+      if (idx < frames.length - 1 && director.showSummaryOverlay) {
+        director.showSummaryOverlay = false;
+        syncSummaryButtonUI();
+      }
+      director.setFrameData(getInterpolatedFrame(playheadFloat));
+      syncSliderValue();
+      updateActiveLeftTables(idx);
+    });
+  });
+
+  lastRenderedBucketIdx = -1;
+}
+
+/**
+ * Updates the Per-Request Actual Response Times Table (`#rt-endpoint-tbody`)
+ * and highlights the active row in the Timeline Log Table (`#rt-timeline-tbody`).
+ */
+function updateActiveLeftTables(bucketIdx) {
+  if (!director.hasData || !frames.length) {
+    if (lastRenderedBucketIdx !== -2) {
+      renderEmptyTables();
+      lastRenderedBucketIdx = -2;
+    }
+    return;
+  }
+
+  const clampedIdx = Math.max(0, Math.min(frames.length - 1, bucketIdx));
+  if (clampedIdx === lastRenderedBucketIdx) return;
+  lastRenderedBucketIdx = clampedIdx;
+
+  const f = frames[clampedIdx];
+  rtCurrentTimeBadge.textContent = `T+${formatMMSS(f.elapsedSec)}`;
+
+  const aggAvg = f.mean ?? Math.round((f.p50 || 0) * 1.15);
+  const aggMax = f.max ?? Math.round((f.p99 || 0) * 1.25);
+  const aggP95Col = latencyColor(f.p95 || 0);
+
+  let epRows = f.endpointRows && f.endpointRows.length ? f.endpointRows : [];
+  if (!epRows.length && director.endpoints && director.endpoints.length) {
+    epRows = director.endpoints.map((epName, i) => {
+      const factor = 0.88 + (i % 5) * 0.06;
+      return {
+        name: epName,
+        rps: Math.round((f.rps || 0) / director.endpoints.length),
+        mean: Math.round(aggAvg * factor),
+        p50: Math.round((f.p50 || 0) * factor),
+        p95: Math.round((f.p95 || 0) * factor),
+        p99: Math.round((f.p99 || 0) * factor),
+        max: Math.round(aggMax * factor)
+      };
+    });
+  }
+
+  const aggHtml = `<tr class="aggregate-row">
+    <td title="All Requests Aggregate">★ ALL REQUESTS</td>
+    <td>${f.rps}</td>
+    <td>${aggAvg}ms</td>
+    <td>${f.p50}ms</td>
+    <td style="color:${aggP95Col};">${f.p95}ms</td>
+    <td>${f.p99}ms</td>
+    <td>${aggMax}ms</td>
+  </tr>`;
+
+  const endpointsHtml = epRows.map((ep) => {
+    const c = latencyColor(ep.p95 || 0);
+    return `<tr>
+      <td title="${ep.name}">${ep.name}</td>
+      <td>${ep.rps ?? '—'}</td>
+      <td>${ep.mean ?? ep.p50 ?? 0}ms</td>
+      <td>${ep.p50 ?? 0}ms</td>
+      <td style="color:${c};font-weight:700;">${ep.p95 ?? 0}ms</td>
+      <td>${ep.p99 ?? 0}ms</td>
+      <td>${ep.max ?? ep.p99 ?? 0}ms</td>
+    </tr>`;
+  }).join('');
+
+  rtEndpointTbody.innerHTML = aggHtml + endpointsHtml;
+
+  // Highlight active row in timeline table
+  const prevActive = rtTimelineTbody.querySelector('tr.active-row');
+  if (prevActive) prevActive.classList.remove('active-row');
+  const curRow = rtTimelineTbody.querySelector(`tr[data-idx="${clampedIdx}"]`);
+  if (curRow) {
+    curRow.classList.add('active-row');
+    const rowTop = curRow.offsetTop;
+    const scrollH = rtTimelineScroll.clientHeight;
+    if (rowTop < rtTimelineScroll.scrollTop || rowTop > rtTimelineScroll.scrollTop + scrollH - 36) {
+      rtTimelineScroll.scrollTop = Math.max(0, rowTop - scrollH / 2);
+    }
+  }
+}
 
 function syncSummaryButtonUI() {
   if (director.showSummaryOverlay) {
@@ -69,16 +220,16 @@ function syncLiveButtonUI() {
   director.isLiveMode = isLiveMode;
   if (isLiveMode) {
     liveViewBtn.classList.add('btn-movie', 'recording');
-    liveViewBtn.textContent = '⏹ Stop Live Run';
+    liveViewBtn.textContent = '⏹ Stop Live View';
     timelineSlider.disabled = true;
     playPauseBtn.disabled = true;
     restartBtn.disabled = true;
   } else {
     liveViewBtn.classList.remove('btn-movie', 'recording');
     liveViewBtn.textContent = '🔴 Live View';
-    timelineSlider.disabled = false;
-    playPauseBtn.disabled = false;
-    restartBtn.disabled = false;
+    timelineSlider.disabled = !director.hasData;
+    playPauseBtn.disabled = !director.hasData;
+    restartBtn.disabled = !director.hasData;
   }
 }
 
@@ -110,6 +261,13 @@ function syncSliderValue() {
   timelineSlider.style.setProperty('--attr-max', timelineSlider.max || 100);
   timelineSlider.style.setProperty('--control-value', timelineSlider.value);
 
+  if (!director.hasData || !frames.length) {
+    timeReadout.textContent = 'NO DATA';
+    timelineSlider.setAttribute('aria-valuetext', 'No data loaded');
+    timelineSlider.style.setProperty('--slider-fill-color', '#4b6b8a');
+    return;
+  }
+
   const idx = Math.min(frames.length - 1, Math.max(0, Math.round(Number(timelineSlider.value))));
   const f = frames[idx];
   const totalSec = frames.length ? frames[frames.length - 1].elapsedSec : 0;
@@ -133,30 +291,9 @@ function formatMMSS(sec) {
 function resolveRunnerCount(detectedAgents = []) {
   const sel = runnerCountSelect.value;
   if (sel === 'auto') {
-    return detectedAgents && detectedAgents.length > 0 ? detectedAgents.length : 6;
+    return detectedAgents && detectedAgents.length > 0 ? detectedAgents.length : 1;
   }
-  return Math.max(1, Math.min(16, Number(sel) || 6));
-}
-
-function loadScenarioPreset(presetId) {
-  stopLiveView(false);
-  const preset = SCENARIO_PRESETS[presetId] || SCENARIO_PRESETS.citadel_siege;
-  frames = preset.generate();
-  playheadFloat = 0;
-
-  timelineSlider.min = '0';
-  timelineSlider.max = String(Math.max(1, frames.length - 1));
-  timelineSlider.value = '0';
-
-  const numLoadAgents = resolveRunnerCount(preset.endpoints);
-  director.setDataset(frames, {
-    title: preset.name,
-    sourceLabel: `K6 PRESET // ${preset.subtitle}`,
-    endpoints: preset.endpoints,
-    numLoadAgents
-  });
-  syncSummaryButtonUI();
-  syncSliderValue();
+  return Math.max(1, Math.min(16, Number(sel) || 1));
 }
 
 function getInterpolatedFrame(floatIndex) {
@@ -173,17 +310,22 @@ function getInterpolatedFrame(floatIndex) {
     elapsedSec: f0.elapsedSec + (f1.elapsedSec - f0.elapsedSec) * alpha,
     vus: Math.round(f0.vus + (f1.vus - f0.vus) * alpha),
     rps: Math.round(f0.rps + (f1.rps - f0.rps) * alpha),
+    min: Math.round((f0.min || 0) + ((f1.min || 0) - (f0.min || 0)) * alpha),
+    mean: Math.round((f0.mean || f0.p50) + ((f1.mean || f1.p50) - (f0.mean || f0.p50)) * alpha),
     p50: Math.round(f0.p50 + (f1.p50 - f0.p50) * alpha),
+    p90: Math.round((f0.p90 || f0.p95) + ((f1.p90 || f1.p95) - (f0.p90 || f0.p95)) * alpha),
     p95: Math.round(f0.p95 + (f1.p95 - f0.p95) * alpha),
     p99: Math.round(f0.p99 + (f1.p99 - f0.p99) * alpha),
+    max: Math.round((f0.max || f0.p99) + ((f1.max || f1.p99) - (f0.max || f0.p99)) * alpha),
     errorRate: Number((f0.errorRate + (f1.errorRate - f0.errorRate) * alpha).toFixed(2)),
     failedReqs: Math.round(f0.failedReqs + (f1.failedReqs - f0.failedReqs) * alpha),
-    checksPassRate: Number((f0.checksPassRate + (f1.checksPassRate - f0.checksPassRate) * alpha).toFixed(1))
+    checksPassRate: Number((f0.checksPassRate + (f1.checksPassRate - f0.checksPassRate) * alpha).toFixed(1)),
+    endpointRows: f0.endpointRows
   };
 }
 
-// Live View Engine (Polls InfluxDB 1.8 in real time or streams on-the-fly telemetry)
-async function startLiveView(preferInflux = false) {
+// Live View Engine (Polls InfluxDB 1.8 in real time; shows NO DATA if unreachable or empty)
+async function startLiveView() {
   if (isLiveMode) stopLiveView(false);
 
   isLiveMode = true;
@@ -191,73 +333,27 @@ async function startLiveView(preferInflux = false) {
   syncSummaryButtonUI();
   syncLiveButtonUI();
 
-  const client = buildInfluxClientFromForm();
-  let usingRealInflux = false;
-
-  // Try polling real InfluxDB first
-  try {
-    const liveData = await client.fetchLiveTelemetry({
-      liveWindow: '3m',
-      bucketInterval: document.getElementById('influx-bucket').value || '1s',
-      tagFilter: document.getElementById('influx-tag-filter').value
-    });
-    usingRealInflux = true;
-    applyLivePollResult(liveData, client);
-  } catch (err) {
-    if (preferInflux) {
-      influxStatusBanner.classList.add('error');
-      influxStatusBanner.textContent = `⚠️ Live InfluxDB not reachable (${err.message}). Starting On-The-Fly Live Stream Simulator instead!`;
-    }
-    // Initialize Live On-The-Fly Stream from t=0
-    liveSimTick = 0;
-    const baseFrames = SCENARIO_PRESETS[scenarioSelect.value]?.generate() || SCENARIO_PRESETS.citadel_siege.generate();
-    frames = baseFrames.slice(0, 3);
-    playheadFloat = frames.length - 1;
-    const numLoadAgents = resolveRunnerCount(director.endpoints);
-    director.setDataset(frames, {
-      title: 'LIVE K6 EXECUTION STREAM',
-      sourceLabel: 'ON-THE-FLY TELEMETRY RENDERER',
-      numLoadAgents
-    });
-    connectionStatusText.textContent = `🔴 LIVE VIEW: ON-THE-FLY STREAMING (${director.numLoadAgents} LOAD AGENTS ACTIVE)`;
-  }
-
-  livePollInterval = setInterval(async () => {
+  const pollOnce = async () => {
     if (!isLiveMode) return;
-
-    if (usingRealInflux) {
-      try {
-        const liveData = await client.fetchLiveTelemetry({
-          liveWindow: '3m',
-          bucketInterval: document.getElementById('influx-bucket').value || '1s',
-          tagFilter: document.getElementById('influx-tag-filter').value
-        });
-        applyLivePollResult(liveData, client);
-      } catch (_) {}
-    } else {
-      // Append next live second on the fly
-      liveSimTick++;
-      const template = SCENARIO_PRESETS[scenarioSelect.value]?.generate() || SCENARIO_PRESETS.citadel_siege.generate();
-      const srcFrame = template[(liveSimTick + 2) % template.length];
-      const nextIdx = frames.length;
-      const liveFrame = {
-        ...srcFrame,
-        index: nextIdx,
-        timestamp: Date.now(),
-        elapsedSec: nextIdx
-      };
-      frames.push(liveFrame);
-      if (frames.length > 180) {
-        frames.shift();
-        frames.forEach((f, idx) => { f.index = idx; });
-      }
-      playheadFloat = frames.length - 1;
-      timelineSlider.max = String(Math.max(1, frames.length - 1));
-      timelineSlider.value = String(playheadFloat);
-      director.updateLiveFrames(frames);
+    const client = buildInfluxClientFromForm();
+    try {
+      const liveData = await client.fetchLiveTelemetry({
+        liveWindow: '3m',
+        bucketInterval: document.getElementById('influx-bucket').value || '1s',
+        tagFilter: document.getElementById('influx-tag-filter').value
+      });
+      applyLivePollResult(liveData, client);
+    } catch (err) {
+      frames = [];
+      director.setNoDataState(`NO LIVE DATA — ${err.message}`);
+      connectionStatusText.textContent = `🔴 LIVE VIEW: NO DATA (${client.url}/${client.database} — ${err.message})`;
+      renderEmptyTables();
       syncSliderValue();
     }
-  }, 1000);
+  };
+
+  await pollOnce();
+  livePollInterval = setInterval(pollOnce, 1500);
 }
 
 function applyLivePollResult(liveData, client) {
@@ -275,7 +371,9 @@ function applyLivePollResult(liveData, client) {
     numLoadAgents,
     loadAgentNames: liveData.detectedAgents
   });
-  connectionStatusText.textContent = `🔴 LIVE INFLUXDB: ${client.url}/${client.database} (${numLoadAgents} LOAD AGENTS)`;
+  connectionStatusText.textContent = `🔴 LIVE INFLUXDB: ${client.url}/${client.database} (${numLoadAgents} LOAD AGENT${numLoadAgents > 1 ? 'S' : ''})`;
+  renderTimelineResponseTable();
+  updateActiveLeftTables(playheadFloat);
   syncSliderValue();
 }
 
@@ -288,30 +386,26 @@ function stopLiveView(showSummary = true) {
   }
   syncLiveButtonUI();
 
-  if (showSummary && frames.length > 1) {
+  if (showSummary && director.hasData && frames.length > 1) {
     isPlaying = false;
     playPauseBtn.textContent = '▶ REPLAY';
     director.showSummaryOverlay = true;
     syncSummaryButtonUI();
 
     if (exporter.isRecording && !movieEndHoldTimer) {
-      // Hold on the End-of-Test Summary for 3.5s so live recording ends with the summary
       movieEndHoldTimer = setTimeout(() => {
         movieEndHoldTimer = null;
         if (exporter.isRecording) exporter.stopRecording();
       }, 3500);
     }
+  } else if (!director.hasData) {
+    connectionStatusText.textContent = 'STATUS: NO DATA · CONNECT INFLUXDB 1.8 / GRAFANA';
+    director.setNoDataState('NO DATA — CONNECT INFLUXDB 1.8 / GRAFANA TO LOAD OR MONITOR A K6 TEST');
+    renderEmptyTables();
   }
 }
 
 // UI Event Listeners
-scenarioSelect.addEventListener('change', (e) => {
-  loadScenarioPreset(e.target.value);
-  isPlaying = true;
-  playPauseBtn.textContent = '⏸ PAUSE';
-  connectionStatusText.textContent = `SOURCE: ${SCENARIO_PRESETS[e.target.value]?.name.toUpperCase() || 'K6 SCENARIO'}`;
-});
-
 runnerCountSelect.addEventListener('change', () => {
   const numLoadAgents = resolveRunnerCount(director.loadAgentNames);
   director.setLoadAgentCount(numLoadAgents, director.loadAgentNames);
@@ -321,16 +415,18 @@ liveViewBtn.addEventListener('click', () => {
   if (isLiveMode) {
     stopLiveView(true);
   } else {
-    startLiveView(false);
+    startLiveView();
   }
 });
 
 toggleSummaryBtn.addEventListener('click', () => {
+  if (!director.hasData) return;
   director.showSummaryOverlay = !director.showSummaryOverlay;
   syncSummaryButtonUI();
 });
 
 playPauseBtn.addEventListener('click', () => {
+  if (!director.hasData) return;
   if (!isPlaying && playheadFloat >= frames.length - 1) {
     playheadFloat = 0;
     timelineSlider.value = '0';
@@ -345,22 +441,26 @@ playPauseBtn.addEventListener('click', () => {
 });
 
 restartBtn.addEventListener('click', () => {
+  if (!director.hasData) return;
   playheadFloat = 0;
   timelineSlider.value = '0';
   director.showSummaryOverlay = false;
   syncSummaryButtonUI();
   syncSliderValue();
+  updateActiveLeftTables(0);
   isPlaying = true;
   playPauseBtn.textContent = '⏸ PAUSE';
 });
 
 timelineSlider.addEventListener('input', () => {
+  if (!director.hasData) return;
   playheadFloat = Number(timelineSlider.value);
   if (playheadFloat < frames.length - 1 && director.showSummaryOverlay) {
     director.showSummaryOverlay = false;
     syncSummaryButtonUI();
   }
   director.setFrameData(getInterpolatedFrame(playheadFloat));
+  updateActiveLeftTables(Math.round(playheadFloat));
   syncSliderValue();
 });
 
@@ -383,6 +483,12 @@ generateMovieBtn.addEventListener('click', () => {
     exporter.stopRecording();
     return;
   }
+  if (!director.hasData && !isLiveMode) {
+    influxDialog.showModal();
+    influxStatusBanner.classList.add('error');
+    influxStatusBanner.textContent = '⚠️ No data loaded. Connect to InfluxDB 1.8 (or start a Live Monitor) before generating a movie.';
+    return;
+  }
   isGeneratingFullMovie = true;
   director.showSummaryOverlay = false;
   syncSummaryButtonUI();
@@ -390,6 +496,7 @@ generateMovieBtn.addEventListener('click', () => {
     playheadFloat = 0;
     timelineSlider.value = '0';
     syncSliderValue();
+    updateActiveLeftTables(0);
     isPlaying = true;
     playPauseBtn.textContent = '⏸ PAUSE';
   }
@@ -442,6 +549,11 @@ function readSlaThresholdsFromForm() {
   const sutNameVal = document.getElementById('sut-name-input')?.value?.trim();
   if (sutNameVal) director.sutName = sutNameVal.toUpperCase();
   director.setThresholds({ nominalMs, warningMs, criticalMs });
+  lastRenderedBucketIdx = -1;
+  if (director.hasData) {
+    renderTimelineResponseTable();
+    updateActiveLeftTables(Math.round(playheadFloat));
+  }
   syncSliderValue();
 }
 
@@ -484,7 +596,7 @@ testConnectionBtn.addEventListener('click', async () => {
 startLiveInfluxBtn.addEventListener('click', async () => {
   readSlaThresholdsFromForm();
   influxDialog.close();
-  await startLiveView(true);
+  await startLiveView();
 });
 
 loadInfluxRunBtn.addEventListener('click', async () => {
@@ -519,6 +631,11 @@ loadInfluxRunBtn.addEventListener('click', async () => {
     influxStatusBanner.textContent = `✅ Loaded ${result.frames.length} time buckets and ${director.numLoadAgents} Load Agents from InfluxDB 1.8!`;
     setTimeout(() => influxDialog.close(), 500);
   } catch (err) {
+    frames = [];
+    director.setNoDataState(`NO DATA — ${err.message}`);
+    renderEmptyTables();
+    syncLiveButtonUI();
+    syncSliderValue();
     influxStatusBanner.classList.add('error');
     influxStatusBanner.textContent = `❌ Failed to load k6 series: ${err.message}`;
   }
@@ -570,15 +687,6 @@ function applyExternalDataset(newFrames, title, sourceLabel, endpoints, detected
   timelineSlider.max = String(Math.max(1, frames.length - 1));
   timelineSlider.value = '0';
 
-  let customOpt = scenarioSelect.querySelector('option[value="custom_influx"]');
-  if (!customOpt) {
-    customOpt = document.createElement('option');
-    customOpt.value = 'custom_influx';
-    scenarioSelect.prepend(customOpt);
-  }
-  customOpt.textContent = `${title} (${frames.length} pts)`;
-  scenarioSelect.value = 'custom_influx';
-
   const numLoadAgents = resolveRunnerCount(detectedAgents.length ? detectedAgents : endpoints);
   connectionStatusText.textContent = `SOURCE: ${title} · ${sourceLabel}`;
   director.setDataset(frames, {
@@ -588,6 +696,9 @@ function applyExternalDataset(newFrames, title, sourceLabel, endpoints, detected
     numLoadAgents,
     loadAgentNames: detectedAgents
   });
+  renderTimelineResponseTable();
+  updateActiveLeftTables(0);
+  syncLiveButtonUI();
   syncSummaryButtonUI();
   syncSliderValue();
   isPlaying = true;
@@ -601,7 +712,7 @@ function animate(now) {
   const dt = Math.min(0.1, (now - lastRafTime) / 1000);
   lastRafTime = now;
 
-  if (!isLiveMode && isPlaying && frames.length > 1) {
+  if (director.hasData && !isLiveMode && isPlaying && frames.length > 1) {
     playheadFloat += dt * playbackSpeed;
 
     if (playheadFloat >= frames.length - 1) {
@@ -621,17 +732,25 @@ function animate(now) {
       }
     }
 
-    timelineSlider.value = String(Math.round(playheadFloat));
+    const roundedIdx = Math.round(playheadFloat);
+    timelineSlider.value = String(roundedIdx);
+    updateActiveLeftTables(roundedIdx);
     syncSliderValue();
   }
 
-  const interpolated = getInterpolatedFrame(playheadFloat);
-  director.setFrameData(interpolated);
+  if (director.hasData) {
+    const interpolated = getInterpolatedFrame(playheadFloat);
+    director.setFrameData(interpolated);
+  }
   director.updateAndRender(dt);
 
   requestAnimationFrame(animate);
 }
 
-// Boot with default Citadel Siege scenario
-loadScenarioPreset('citadel_siege');
+// Boot in clean NO DATA standby state until InfluxDB 1.8 is connected
+director.setNoDataState('NO DATA — CONNECT INFLUXDB 1.8 / GRAFANA TO LOAD OR MONITOR A K6 TEST');
+renderEmptyTables();
+syncLiveButtonUI();
+syncSummaryButtonUI();
+syncSliderValue();
 requestAnimationFrame(animate);

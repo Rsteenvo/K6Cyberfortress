@@ -31,44 +31,40 @@ export class CyberFortressDirector {
       criticalMs: 1100
     };
 
-    this.numLoadAgents = options.numLoadAgents || 6;
+    this.numLoadAgents = options.numLoadAgents || 1;
     this.loadAgentNames = [];
     this.isLiveMode = false;
+    this.hasData = false;
+    this.noDataMessage = 'NO DATA — CONNECT INFLUXDB 1.8 / GRAFANA TO LOAD OR MONITOR A K6 TEST';
 
     this.cameraMode = 'auto'; // 'auto' | 'orbit' | 'highway' | 'agents' | 'core' | 'top'
     this.showHudInCanvas = true;
     this.showSummaryOverlay = false;
-    this.sutName = 'SUT // CORE-API-CLUSTER';
-    this.testTitle = 'OPERATION CITADEL SIEGE';
-    this.sourceLabel = 'INFLUXDB 1.8 // K6 TELEMETRY';
-    this.endpoints = [
-      '/api/v2/auth/token',
-      '/api/v2/checkout/submit',
-      '/api/v2/catalog/search',
-      '/api/v2/inventory/reserve',
-      '/api/v2/payments/authorize',
-      '/api/v2/profile/session'
-    ];
+    this.sutName = 'SUT // SYSTEM UNDER TEST';
+    this.testTitle = 'NO TEST LOADED';
+    this.sourceLabel = 'AWAITING INFLUXDB 1.8 CONNECTION';
+    this.endpoints = [];
 
     this.currentFrame = {
+      noData: true,
       index: 0,
       elapsedSec: 0,
-      vus: 100,
-      rps: 350,
-      p50: 40,
-      p95: 65,
-      p99: 110,
+      vus: 0,
+      rps: 0,
+      p50: 0,
+      p95: 0,
+      p99: 0,
       errorRate: 0,
       failedReqs: 0,
-      checksPassRate: 100
+      checksPassRate: 0
     };
-    this.allFrames = [this.currentFrame];
+    this.allFrames = [];
     this.summaryStats = null;
     this.thermal = computeThermalState(this.currentFrame, this.thresholds);
     this.smoothedHeat = 0;
-    this.smoothedRps = 350;
-    this.smoothedVus = 100;
-    this.smoothedP95 = 65;
+    this.smoothedRps = 0;
+    this.smoothedVus = 0;
+    this.smoothedP95 = 0;
 
     this.userAzimuthOffset = 0;
     this.userElevationOffset = 0;
@@ -531,8 +527,37 @@ export class CyberFortressDirector {
     }, { passive: false });
   }
 
+  setNoDataState(message = 'NO DATA — CONNECT INFLUXDB 1.8 / GRAFANA TO LOAD OR MONITOR A K6 TEST') {
+    this.hasData = false;
+    this.noDataMessage = message;
+    this.testTitle = 'NO DATA';
+    this.sourceLabel = 'NO INFLUXDB 1.8 DATA LOADED';
+    this.allFrames = [];
+    this.summaryStats = null;
+    this.showSummaryOverlay = false;
+    this.currentFrame = {
+      noData: true,
+      index: 0,
+      elapsedSec: 0,
+      vus: 0,
+      rps: 0,
+      p50: 0,
+      p95: 0,
+      p99: 0,
+      errorRate: 0,
+      failedReqs: 0,
+      checksPassRate: 0
+    };
+    this.thermal = computeThermalState(this.currentFrame, this.thresholds);
+  }
+
   setDataset(frames, metadata = {}) {
-    this.allFrames = frames && frames.length ? frames : [this.currentFrame];
+    if (!frames || !frames.length) {
+      this.setNoDataState(metadata.noDataMessage);
+      return;
+    }
+    this.hasData = true;
+    this.allFrames = frames;
     if (metadata.title) this.testTitle = metadata.title.toUpperCase();
     if (metadata.sourceLabel) this.sourceLabel = metadata.sourceLabel.toUpperCase();
     if (metadata.sutName) this.sutName = metadata.sutName.toUpperCase();
@@ -544,14 +569,18 @@ export class CyberFortressDirector {
     }
     this.showSummaryOverlay = false;
     this.summaryStats = this._computeSummaryStats();
-    this.setFrameData(this.allFrames[this.allFrames.length - 1] && this.isLiveMode ? this.allFrames[this.allFrames.length - 1] : this.allFrames[0]);
+    this.setFrameData(this.isLiveMode ? this.allFrames[this.allFrames.length - 1] : this.allFrames[0]);
   }
 
   /**
    * Appends or updates rolling frames during LIVE VIEW without resetting camera or overlay state.
    */
   updateLiveFrames(frames, metadata = {}) {
-    if (!frames || !frames.length) return;
+    if (!frames || !frames.length) {
+      this.setNoDataState(metadata.noDataMessage || 'NO LIVE DATA — AWAITING ACTIVE K6 STREAM IN INFLUXDB');
+      return;
+    }
+    this.hasData = true;
     this.allFrames = frames;
     if (metadata.title) this.testTitle = metadata.title.toUpperCase();
     if (metadata.sourceLabel) this.sourceLabel = metadata.sourceLabel.toUpperCase();
@@ -789,10 +818,12 @@ export class CyberFortressDirector {
     });
 
     // 2. Update Highway Bot Swarms across the N active Load Agent streams
-    const activeHighwayCount = Math.min(
-      MAX_HIGHWAY_BOTS,
-      Math.max(45, Math.round((this.smoothedRps / 4500) * MAX_HIGHWAY_BOTS * 0.85 + (this.smoothedVus / 2500) * 250))
-    );
+    const activeHighwayCount = this.hasData
+      ? Math.min(
+          MAX_HIGHWAY_BOTS,
+          Math.max(45, Math.round((this.smoothedRps / 4500) * MAX_HIGHWAY_BOTS * 0.85 + (this.smoothedVus / 2500) * 250))
+        )
+      : 0;
     const botSpeed = 14 + Math.min(48, (this.smoothedRps / 4000) * 36);
     const dummy = new THREE.Object3D();
     const botColor = new THREE.Color();
@@ -845,10 +876,12 @@ export class CyberFortressDirector {
     if (this.highwayBotMesh.instanceColor) this.highwayBotMesh.instanceColor.needsUpdate = true;
 
     // 3. Update Inner SUT Congestion Queue Bots
-    const activeQueueCount = Math.min(
-      MAX_QUEUE_BOTS,
-      Math.max(20, Math.round(Math.pow(heat, 1.15) * MAX_QUEUE_BOTS))
-    );
+    const activeQueueCount = this.hasData
+      ? Math.min(
+          MAX_QUEUE_BOTS,
+          Math.max(20, Math.round(Math.pow(heat, 1.15) * MAX_QUEUE_BOTS))
+        )
+      : 0;
 
     for (let i = 0; i < MAX_QUEUE_BOTS; i++) {
       if (i >= activeQueueCount) {
@@ -882,10 +915,12 @@ export class CyberFortressDirector {
     if (this.queueBotMesh.instanceColor) this.queueBotMesh.instanceColor.needsUpdate = true;
 
     // 4. Update Rising Thermal Plume Particles
-    const activeParticleCount = Math.min(
-      MAX_THERMAL_PARTICLES,
-      Math.round(60 + heat * (MAX_THERMAL_PARTICLES - 60))
-    );
+    const activeParticleCount = this.hasData
+      ? Math.min(
+          MAX_THERMAL_PARTICLES,
+          Math.round(60 + heat * (MAX_THERMAL_PARTICLES - 60))
+        )
+      : 0;
 
     for (let i = 0; i < MAX_THERMAL_PARTICLES; i++) {
       if (i >= activeParticleCount) {
@@ -1040,7 +1075,6 @@ export class CyberFortressDirector {
     ctx.fill();
     ctx.stroke();
 
-    // Pulsing dot (Red if LIVE VIEW, else thermal color)
     ctx.fillStyle = this.isLiveMode
       ? (Math.sin(this.clockTime * 8) > 0 ? '#ff004c' : '#ff6688')
       : this.thermal.colorHex;
@@ -1079,30 +1113,30 @@ export class CyberFortressDirector {
     const cards = [
       {
         label: 'TOTAL LOAD AGENTS SWARM',
-        value: f.vus.toLocaleString(),
-        unit: 'VUs',
-        sub: `${this.numLoadAgents} ACTIVE LOAD AGENT RUNNER${this.numLoadAgents > 1 ? 'S' : ''}`,
+        value: this.hasData ? f.vus.toLocaleString() : '—',
+        unit: this.hasData ? 'VUs' : 'NO DATA',
+        sub: `${this.numLoadAgents} LOAD AGENT RUNNER${this.numLoadAgents > 1 ? 'S' : ''} CONFIGURED`,
         color: '#00f0ff'
       },
       {
         label: 'SUT INGRESS THROUGHPUT',
-        value: f.rps.toLocaleString(),
-        unit: 'REQ/S',
-        sub: `${Math.round(f.rps * 60).toLocaleString()} REQ/MIN`,
+        value: this.hasData ? f.rps.toLocaleString() : '—',
+        unit: this.hasData ? 'REQ/S' : 'NO DATA',
+        sub: this.hasData ? `${Math.round(f.rps * 60).toLocaleString()} REQ/MIN` : 'AWAITING INFLUXDB',
         color: '#38bdf8'
       },
       {
         label: 'SUT RESPONSE TIME (P95)',
-        value: `${f.p95}`,
-        unit: 'ms',
-        sub: `P50: ${f.p50}ms  ·  P99: ${f.p99}ms`,
+        value: this.hasData ? `${f.p95}` : '—',
+        unit: this.hasData ? 'ms' : 'NO DATA',
+        sub: this.hasData ? `P50: ${f.p50}ms  ·  P99: ${f.p99}ms` : 'P50: —  ·  P99: —',
         color: this.thermal.colorHex
       },
       {
         label: 'HTTP ERRORS (FAILED)',
-        value: `${f.errorRate.toFixed(2)}%`,
-        unit: `(${f.failedReqs}/s)`,
-        sub: `CHECKS PASS: ${f.checksPassRate}%`,
+        value: this.hasData ? `${f.errorRate.toFixed(2)}%` : '—',
+        unit: this.hasData ? `(${f.failedReqs}/s)` : 'NO DATA',
+        sub: this.hasData ? `CHECKS PASS: ${f.checksPassRate}%` : 'CHECKS PASS: —',
         color: f.errorRate > 1 ? '#ff004c' : '#10b981'
       }
     ];
@@ -1177,17 +1211,41 @@ export class CyberFortressDirector {
 
     ctx.font = '700 19px "JetBrains Mono", monospace';
     ctx.fillStyle = this.thermal.colorHex;
-    ctx.fillText(`${this.thermal.coreTempC}°C`, gx + 40, gy + gh - 34);
+    ctx.fillText(this.hasData ? `${this.thermal.coreTempC}°C` : '—', gx + 40, gy + gh - 34);
 
     ctx.font = '600 11px "JetBrains Mono", monospace';
     ctx.fillStyle = '#7da2c1';
-    ctx.fillText(`${Math.round(heat * 100)}% HEAT`, gx + 40, gy + gh - 14);
+    ctx.fillText(this.hasData ? `${Math.round(heat * 100)}% HEAT` : 'NO DATA', gx + 40, gy + gh - 14);
+
+    // Centered NO DATA Banner when no InfluxDB data is loaded
+    if (!this.hasData) {
+      const bw = 760;
+      const bh = 96;
+      const bx = (W - bw) / 2;
+      const by = H / 2 - 90;
+      ctx.fillStyle = 'rgba(4, 11, 24, 0.92)';
+      ctx.strokeStyle = 'rgba(0, 240, 255, 0.45)';
+      ctx.lineWidth = 1.8;
+      ctx.beginPath();
+      ctx.roundRect(bx, by, bw, bh, 10);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.font = '800 22px "Space Grotesk", sans-serif';
+      ctx.fillStyle = '#ffffff';
+      ctx.textAlign = 'center';
+      ctx.fillText('⚠️ NO DATA', W / 2, by + 40);
+
+      ctx.font = '600 13px "JetBrains Mono", monospace';
+      ctx.fillStyle = '#00f0ff';
+      ctx.fillText(this.noDataMessage, W / 2, by + 70);
+    }
 
     // 5. Dedicated K6 Response Times (P50 / P95 / P99) & HTTP Errors Graph Panel
     this._drawResponseTimesAndErrorsGraph(ctx, W, H, f);
 
     // 6. End-of-Test Summary Report Overlay
-    if (this.showSummaryOverlay) {
+    if (this.showSummaryOverlay && this.hasData) {
       this._drawTestSummaryOverlay(ctx, W, H);
     }
 
@@ -1206,7 +1264,9 @@ export class CyberFortressDirector {
 
       if (sx > 260 && sx < W - 200 && sy > 95 && sy < H - 240) {
         const sutTitle = `🎯 ${this.sutName} (SYSTEM UNDER TEST)`;
-        const sutSub = `P95: ${f.p95}ms  ·  ERRORS: ${f.errorRate.toFixed(1)}%  ·  CORE: ${this.thermal.coreTempC}°C`;
+        const sutSub = this.hasData
+          ? `P95: ${f.p95}ms  ·  ERRORS: ${f.errorRate.toFixed(1)}%  ·  CORE: ${this.thermal.coreTempC}°C`
+          : 'NO DATA // STANDBY';
         ctx.font = '800 14px "JetBrains Mono", monospace';
         const w1 = ctx.measureText(sutTitle).width;
         ctx.font = '600 11px "JetBrains Mono", monospace';
@@ -1250,16 +1310,18 @@ export class CyberFortressDirector {
       if (sx < 340 || sx > W - 140 || sy < 95 || sy > H - 220) return;
 
       const w = streamWeights[idx] || 1 / this.numLoadAgents;
-      const agentVus = Math.max(1, Math.round((f.vus || 0) * w));
-      const agentRps = Math.round((f.rps || 0) * w);
+      const agentVus = this.hasData ? Math.max(1, Math.round((f.vus || 0) * w)) : 0;
+      const agentRps = this.hasData ? Math.round((f.rps || 0) * w) : 0;
       const customRunner = this.loadAgentNames[idx];
-      const epName = this.endpoints[idx % this.endpoints.length] || `/stream-${idx + 1}`;
+      const epName = this.endpoints[idx % Math.max(1, this.endpoints.length)] || `/stream-${idx + 1}`;
 
       const agentTitle = customRunner
         ? `⚡ LOAD AGENT ${String(idx + 1).padStart(2, '0')} (${customRunner.slice(0, 12)})`
         : `⚡ LOAD AGENT ${String(idx + 1).padStart(2, '0')}`;
-      const line1 = `${agentTitle}  [${agentVus} VUs · ${agentRps} req/s]`;
-      const line2 = `STREAM → ${epName}`;
+      const line1 = this.hasData
+        ? `${agentTitle}  [${agentVus} VUs · ${agentRps} req/s]`
+        : `${agentTitle}  [NO DATA]`;
+      const line2 = this.hasData ? `STREAM → ${epName}` : 'STANDBY';
 
       ctx.font = '700 11px "JetBrains Mono", monospace';
       const tw = Math.max(ctx.measureText(line1).width, ctx.measureText(line2).width) + 20;
@@ -1291,8 +1353,10 @@ export class CyberFortressDirector {
       const sy = (-projected.y * 0.5 + 0.5) * H;
       if (sx < 340 || sx > W - 140 || sy < 100 || sy > H - 220) return;
 
-      const epName = this.endpoints[idx % this.endpoints.length] || `GATE-0${idx + 1}`;
-      const label = `SUT GATE ${String(idx + 1).padStart(2, '0')}: ${epName}`;
+      const epName = this.endpoints[idx % Math.max(1, this.endpoints.length)] || `GATE-0${idx + 1}`;
+      const label = this.hasData
+        ? `SUT GATE ${String(idx + 1).padStart(2, '0')}: ${epName}`
+        : `SUT GATE ${String(idx + 1).padStart(2, '0')}`;
       const textWidth = ctx.measureText(label).width;
 
       ctx.fillStyle = 'rgba(4, 10, 22, 0.78)';
@@ -1329,7 +1393,9 @@ export class CyberFortressDirector {
     ctx.font = '700 13px "JetBrains Mono", monospace';
     ctx.fillStyle = '#ffffff';
     ctx.textAlign = 'left';
-    const modeTag = this.isLiveMode ? '🔴 LIVE TELEMETRY STREAM' : `T+${formatElapsed(f.elapsedSec)}`;
+    const modeTag = !this.hasData
+      ? 'NO DATA'
+      : (this.isLiveMode ? '🔴 LIVE TELEMETRY STREAM' : `T+${formatElapsed(f.elapsedSec)}`);
     ctx.fillText(
       `📈 K6 RESPONSE TIMES (MS) & HTTP ERRORS GRAPH  —  ${modeTag}`,
       panelX + 18,
@@ -1337,10 +1403,10 @@ export class CyberFortressDirector {
     );
 
     const legendItems = [
-      { text: `━ P50: ${f.p50}ms`, color: '#00f0ff' },
-      { text: `━ P95: ${f.p95}ms`, color: '#ff6b00' },
-      { text: `┅ P99: ${f.p99}ms`, color: '#c084fc' },
-      { text: `▮ HTTP ERRORS: ${f.errorRate.toFixed(2)}% (${f.failedReqs}/s)`, color: '#ff004c' }
+      { text: this.hasData ? `━ P50: ${f.p50}ms` : '━ P50: —', color: '#00f0ff' },
+      { text: this.hasData ? `━ P95: ${f.p95}ms` : '━ P95: —', color: '#ff6b00' },
+      { text: this.hasData ? `┅ P99: ${f.p99}ms` : '┅ P99: —', color: '#c084fc' },
+      { text: this.hasData ? `▮ HTTP ERRORS: ${f.errorRate.toFixed(2)}% (${f.failedReqs}/s)` : '▮ HTTP ERRORS: —', color: '#ff004c' }
     ];
 
     let lx = panelX + panelW - 24;
@@ -1360,7 +1426,11 @@ export class CyberFortressDirector {
     const plotW = plotRight - plotLeft;
     const plotH = plotBottom - plotTop;
 
-    if (this.allFrames.length < 2) {
+    if (!this.hasData || this.allFrames.length < 2) {
+      ctx.font = '600 13px "JetBrains Mono", monospace';
+      ctx.fillStyle = '#7da2c1';
+      ctx.textAlign = 'center';
+      ctx.fillText('NO DATA — CONNECT INFLUXDB 1.8 TO PLOT RESPONSE TIMES & ERRORS', panelX + panelW / 2, plotTop + plotH / 2 + 6);
       ctx.restore();
       return;
     }

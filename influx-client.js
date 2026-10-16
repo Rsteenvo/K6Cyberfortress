@@ -1,10 +1,11 @@
 /**
  * k6 Cyber-Fortress — InfluxDB 1.8 & Grafana Datasource Client
- * Supports:
- *   1. Historical Test Execution loading
- *   2. Real-time LIVE VIEW polling (on-the-fly rendering of an active k6 run)
- *   3. Dynamic detection of active Load Agents / Runners from InfluxDB tags
- *      (instance_id, runner, load_zone, scenario, name)
+ * Queries both aggregate and per-endpoint ("name" tag) actual response times:
+ *   - vus (MAX("value"))
+ *   - http_reqs (SUM("value"))
+ *   - http_req_duration (MIN, MEAN, PERCENTILE 50, PERCENTILE 90, PERCENTILE 95, PERCENTILE 99, MAX)
+ *   - http_req_failed (MEAN("value"), SUM("value"))
+ *   - Per-request/endpoint breakdown grouped by "name" tag
  */
 
 export class InfluxK6Client {
@@ -77,9 +78,6 @@ export class InfluxK6Client {
     return await response.json();
   }
 
-  /**
-   * Discovers measurements, latest timestamps, endpoints, and active Load Agent / Runner tags.
-   */
   async discoverMetadata() {
     const discoveryQuery = [
       'SHOW MEASUREMENTS',
@@ -110,9 +108,6 @@ export class InfluxK6Client {
     };
   }
 
-  /**
-   * Resolves the list of distinct Load Agents / Runners from InfluxDB tag values.
-   */
   async detectLoadAgents(whereClause = '') {
     const candidateKeys = this.runnerTagKey && this.runnerTagKey !== 'auto'
       ? [this.runnerTagKey]
@@ -131,9 +126,7 @@ export class InfluxK6Client {
             agents: vals.slice(0, 16)
           };
         }
-      } catch (_) {
-        // try next candidate tag key
-      }
+      } catch (_) {}
     }
 
     return {
@@ -142,9 +135,25 @@ export class InfluxK6Client {
     };
   }
 
-  /**
-   * Fetches a k6 test execution from InfluxDB 1.8 and normalizes it into animation frames.
-   */
+  _buildStatements(whereClause, bucket) {
+    return [
+      // Statement 0: Virtual Users (vus)
+      `SELECT MAX("value") AS "vus" FROM "vus" ${whereClause} GROUP BY time(${bucket}) fill(none)`,
+      // Statement 1: Total HTTP Requests per bucket (http_reqs)
+      `SELECT SUM("value") AS "reqs" FROM "http_reqs" ${whereClause} GROUP BY time(${bucket}) fill(0)`,
+      // Statement 2: Overall HTTP Request Duration stats (min, mean, p50, p90, p95, p99, max)
+      `SELECT PERCENTILE("value", 50) AS "p50", PERCENTILE("value", 95) AS "p95", PERCENTILE("value", 99) AS "p99", MEAN("value") AS "mean", MIN("value") AS "min", MAX("value") AS "max", PERCENTILE("value", 90) AS "p90" FROM "http_req_duration" ${whereClause} GROUP BY time(${bucket}) fill(none)`,
+      // Statement 3: HTTP Request Failed rate
+      `SELECT MEAN("value") AS "fail_rate", SUM("value") AS "fail_count" FROM "http_req_failed" ${whereClause} GROUP BY time(${bucket}) fill(0)`,
+      // Statement 4: Endpoint tag names
+      `SHOW TAG VALUES FROM "http_reqs" WITH KEY = "name"`,
+      // Statement 5: Per-endpoint actual response times grouped by "name"
+      `SELECT MEAN("value") AS "mean", PERCENTILE("value", 50) AS "p50", PERCENTILE("value", 90) AS "p90", PERCENTILE("value", 95) AS "p95", PERCENTILE("value", 99) AS "p99", MAX("value") AS "max" FROM "http_req_duration" ${whereClause} GROUP BY time(${bucket}), "name" fill(none)`,
+      // Statement 6: Per-endpoint request count & error rate grouped by "name"
+      `SELECT SUM("value") AS "reqs" FROM "http_reqs" ${whereClause} GROUP BY time(${bucket}), "name" fill(0)`
+    ];
+  }
+
   async fetchTestExecution(options = {}) {
     const bucket = options.bucketInterval || '2s';
     const bucketSec = parseBucketToSeconds(bucket);
@@ -169,14 +178,7 @@ export class InfluxK6Client {
     const extraTagClause = options.tagFilter?.trim() ? ` AND (${options.tagFilter.trim()})` : '';
     const whereClause = `WHERE ${timeClause}${extraTagClause}`;
 
-    const statements = [
-      `SELECT MAX("value") AS "vus" FROM "vus" ${whereClause} GROUP BY time(${bucket}) fill(none)`,
-      `SELECT SUM("value") AS "reqs" FROM "http_reqs" ${whereClause} GROUP BY time(${bucket}) fill(0)`,
-      `SELECT PERCENTILE("value", 50) AS "p50", PERCENTILE("value", 95) AS "p95", PERCENTILE("value", 99) AS "p99", MEAN("value") AS "mean" FROM "http_req_duration" ${whereClause} GROUP BY time(${bucket}) fill(none)`,
-      `SELECT MEAN("value") AS "fail_rate", SUM("value") AS "fail_count" FROM "http_req_failed" ${whereClause} GROUP BY time(${bucket}) fill(0)`,
-      `SHOW TAG VALUES FROM "http_reqs" WITH KEY = "name"`
-    ];
-
+    const statements = this._buildStatements(whereClause, bucket);
     const [rawResponse, detectedRunners] = await Promise.all([
       this.queryInfluxQL(statements.join('; ')),
       this.detectLoadAgents()
@@ -188,9 +190,6 @@ export class InfluxK6Client {
     return normalized;
   }
 
-  /**
-   * Fetches the rolling live telemetry window for LIVE VIEW mode (`time >= now() - window`).
-   */
   async fetchLiveTelemetry(options = {}) {
     const windowStr = options.liveWindow || '3m';
     const bucket = options.bucketInterval || '1s';
@@ -198,14 +197,7 @@ export class InfluxK6Client {
     const extraTagClause = options.tagFilter?.trim() ? ` AND (${options.tagFilter.trim()})` : '';
     const whereClause = `WHERE time >= now() - ${windowStr}${extraTagClause}`;
 
-    const statements = [
-      `SELECT MAX("value") AS "vus" FROM "vus" ${whereClause} GROUP BY time(${bucket}) fill(none)`,
-      `SELECT SUM("value") AS "reqs" FROM "http_reqs" ${whereClause} GROUP BY time(${bucket}) fill(0)`,
-      `SELECT PERCENTILE("value", 50) AS "p50", PERCENTILE("value", 95) AS "p95", PERCENTILE("value", 99) AS "p99", MEAN("value") AS "mean" FROM "http_req_duration" ${whereClause} GROUP BY time(${bucket}) fill(none)`,
-      `SELECT MEAN("value") AS "fail_rate", SUM("value") AS "fail_count" FROM "http_req_failed" ${whereClause} GROUP BY time(${bucket}) fill(0)`,
-      `SHOW TAG VALUES FROM "http_reqs" WITH KEY = "name"`
-    ];
-
+    const statements = this._buildStatements(whereClause, bucket);
     const [rawResponse, detectedRunners] = await Promise.all([
       this.queryInfluxQL(statements.join('; ')),
       this.detectLoadAgents()
@@ -239,16 +231,22 @@ export function normalizeInfluxResponse(rawResponse, bucketSec = 1) {
         timestamp: ts,
         vus: null,
         reqs: 0,
+        min: null,
+        mean: null,
         p50: null,
+        p90: null,
         p95: null,
         p99: null,
+        max: null,
         failRate: 0,
-        failCount: 0
+        failCount: 0,
+        byEndpoint: {}
       });
     }
     return timeMap.get(ts);
   };
 
+  // Statement 0: vus
   const vusValues = results[0]?.series?.[0]?.values || [];
   for (const [ts, vus] of vusValues) {
     if (vus !== null && vus !== undefined) {
@@ -256,6 +254,7 @@ export function normalizeInfluxResponse(rawResponse, bucketSec = 1) {
     }
   }
 
+  // Statement 1: http_reqs
   const reqValues = results[1]?.series?.[0]?.values || [];
   for (const [ts, reqs] of reqValues) {
     if (reqs !== null && reqs !== undefined) {
@@ -263,14 +262,20 @@ export function normalizeInfluxResponse(rawResponse, bucketSec = 1) {
     }
   }
 
+  // Statement 2: Overall http_req_duration (p50, p95, p99, mean, min, max, p90)
   const durValues = results[2]?.series?.[0]?.values || [];
-  for (const [ts, p50, p95, p99, mean] of durValues) {
+  for (const [ts, p50, p95, p99, mean, min, max, p90] of durValues) {
     const b = ensureBucket(ts);
     b.p50 = p50 ?? mean ?? 0;
     b.p95 = p95 ?? mean ?? 0;
     b.p99 = p99 ?? b.p95 ?? 0;
+    b.mean = mean ?? b.p50 ?? 0;
+    b.min = min ?? b.p50 ?? 0;
+    b.max = max ?? b.p99 ?? 0;
+    b.p90 = p90 ?? b.p95 ?? 0;
   }
 
+  // Statement 3: http_req_failed
   const failValues = results[3]?.series?.[0]?.values || [];
   for (const [ts, failRate, failCount] of failValues) {
     const b = ensureBucket(ts);
@@ -278,8 +283,36 @@ export function normalizeInfluxResponse(rawResponse, bucketSec = 1) {
     b.failCount = Number(failCount || 0);
   }
 
+  // Statement 4: Endpoint tag names
   const endpointValues = results[4]?.series?.[0]?.values || [];
   const endpoints = endpointValues.map((row) => row[1]).filter(Boolean).slice(0, 16);
+
+  // Statement 5: Per-endpoint http_req_duration grouped by "name"
+  const epDurSeries = results[5]?.series || [];
+  for (const serie of epDurSeries) {
+    const epName = serie.tags?.name || 'default';
+    for (const [ts, mean, p50, p90, p95, p99, max] of serie.values || []) {
+      const b = ensureBucket(ts);
+      if (!b.byEndpoint[epName]) b.byEndpoint[epName] = { name: epName, rps: 0 };
+      b.byEndpoint[epName].mean = Math.round(mean ?? p50 ?? 0);
+      b.byEndpoint[epName].p50 = Math.round(p50 ?? mean ?? 0);
+      b.byEndpoint[epName].p90 = Math.round(p90 ?? p95 ?? 0);
+      b.byEndpoint[epName].p95 = Math.round(p95 ?? mean ?? 0);
+      b.byEndpoint[epName].p99 = Math.round(p99 ?? p95 ?? 0);
+      b.byEndpoint[epName].max = Math.round(max ?? p99 ?? 0);
+    }
+  }
+
+  // Statement 6: Per-endpoint http_reqs grouped by "name"
+  const epReqSeries = results[6]?.series || [];
+  for (const serie of epReqSeries) {
+    const epName = serie.tags?.name || 'default';
+    for (const [ts, reqs] of serie.values || []) {
+      const b = ensureBucket(ts);
+      if (!b.byEndpoint[epName]) b.byEndpoint[epName] = { name: epName };
+      b.byEndpoint[epName].rps = Math.round(Number(reqs || 0) / Math.max(0.1, bucketSec));
+    }
+  }
 
   let sorted = Array.from(timeMap.values()).sort((a, b) => a.timestamp - b.timestamp);
 
@@ -298,16 +331,28 @@ export function normalizeInfluxResponse(rawResponse, bucketSec = 1) {
   }
 
   let lastVus = 1;
-  let lastP50 = 40;
-  let lastP95 = 65;
-  let lastP99 = 95;
+  let lastMin = 0;
+  let lastMean = 0;
+  let lastP50 = 0;
+  let lastP90 = 0;
+  let lastP95 = 0;
+  let lastP99 = 0;
+  let lastMax = 0;
+  let lastByEndpoint = {};
   const startTs = sorted[0].timestamp;
 
   const frames = sorted.map((b, idx) => {
     if (b.vus !== null && b.vus !== undefined) lastVus = b.vus;
+    if (b.min !== null && b.min !== undefined) lastMin = b.min;
+    if (b.mean !== null && b.mean !== undefined) lastMean = b.mean;
     if (b.p50 !== null && b.p50 !== undefined) lastP50 = b.p50;
+    if (b.p90 !== null && b.p90 !== undefined) lastP90 = b.p90;
     if (b.p95 !== null && b.p95 !== undefined) lastP95 = b.p95;
     if (b.p99 !== null && b.p99 !== undefined) lastP99 = b.p99;
+    if (b.max !== null && b.max !== undefined) lastMax = b.max;
+    if (Object.keys(b.byEndpoint).length > 0) {
+      lastByEndpoint = { ...lastByEndpoint, ...b.byEndpoint };
+    }
 
     const rps = Math.round(b.reqs / Math.max(0.1, bucketSec));
     const errorRatePct = Number((b.failRate * 100).toFixed(2));
@@ -318,25 +363,23 @@ export function normalizeInfluxResponse(rawResponse, bucketSec = 1) {
       elapsedSec: Math.round((b.timestamp - startTs) / 1000),
       vus: lastVus,
       rps,
+      min: Math.round(lastMin),
+      mean: Math.round(lastMean),
       p50: Math.round(lastP50),
+      p90: Math.round(lastP90),
       p95: Math.round(lastP95),
       p99: Math.round(lastP99),
+      max: Math.round(lastMax),
       errorRate: errorRatePct,
       failedReqs: Math.round(b.failCount / Math.max(0.1, bucketSec)),
-      checksPassRate: Number(Math.max(0, 100 - errorRatePct).toFixed(1))
+      checksPassRate: Number(Math.max(0, 100 - errorRatePct).toFixed(1)),
+      endpointRows: Object.values(lastByEndpoint)
     };
   });
 
   return {
     frames,
-    endpoints: endpoints.length > 0 ? endpoints : [
-      '/api/v2/auth/token',
-      '/api/v2/checkout/submit',
-      '/api/v2/catalog/search',
-      '/api/v2/inventory/reserve',
-      '/api/v2/payments/authorize',
-      '/api/v2/profile/session'
-    ],
+    endpoints: endpoints.length > 0 ? endpoints : Object.keys(lastByEndpoint),
     bucketSec
   };
 }
