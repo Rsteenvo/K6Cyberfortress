@@ -90,6 +90,9 @@ function latencyColor(ms) {
 function renderEmptyTable() {
   rtCurrentTimeBadge.textContent = 'NO DATA';
   rtCombinedTbody.innerHTML = '<tr><td colspan="8" class="rt-empty">NO DATA — Connect InfluxDB 1.8</td></tr>';
+  if (typeof exporter !== 'undefined' && exporter) {
+    exporter.setTableData([], 'NO DATA', director.thresholds);
+  }
 }
 
 /**
@@ -117,13 +120,15 @@ function renderCombinedResponseTable(activeFrame = null) {
   }
 
   const elapsedStr = f ? formatMMSS(f.elapsedSec || 0) : '00:00';
-  rtCurrentTimeBadge.textContent = (isPlaying || isLiveMode)
+  const badgeText = (isPlaying || isLiveMode)
     ? `● LIVE T+${elapsedStr} · ${combinedRequests.length} METRICS`
     : `T+${elapsedStr} · ${combinedRequests.length} METRICS`;
+  rtCurrentTimeBadge.textContent = badgeText;
 
   // Distinct per-endpoint complexity weight so lighter endpoints (OpenHomepage) and heavier
   // endpoints (SubmitCheckoutOrder, AuthorizePaymentGateway) scale realistically with incoming telemetry
   const maxRefP95 = Math.max(1, ...combinedRequests.map((r) => r.p95 || 1000));
+  const liveRowsData = [];
 
   const rowsHtml = combinedRequests.map((req, idx) => {
     const stepStr = req.step || String(idx + 1).padStart(2, '0');
@@ -166,6 +171,19 @@ function renderCombinedResponseTable(activeFrame = null) {
     );
 
     const p95Col = latencyColor(liveP95);
+    liveRowsData.push({
+      step: stepStr,
+      name: req.name,
+      rawName: req.rawName || req.name,
+      min: liveMin,
+      max: liveMax,
+      avg: liveAvg,
+      p95: liveP95,
+      p95Color: p95Col,
+      p99: liveP99,
+      count: liveCount
+    });
+
     return `<tr>
       <td style="color:var(--cyan);font-weight:700;">${stepStr}</td>
       <td title="${req.rawName || req.name}">${req.name}</td>
@@ -179,6 +197,9 @@ function renderCombinedResponseTable(activeFrame = null) {
   }).join('');
 
   rtCombinedTbody.innerHTML = rowsHtml;
+  if (typeof exporter !== 'undefined' && exporter) {
+    exporter.setTableData(liveRowsData, badgeText, director.thresholds);
+  }
 }
 
 function syncSummaryButtonUI() {
@@ -688,6 +709,7 @@ generateMovieBtn.addEventListener('click', () => {
     isPlaying = true;
     playPauseBtn.textContent = '⏸ PAUSE';
   }
+  renderCombinedResponseTable(getInterpolatedFrame(playheadFloat));
   exporter.startRecording('k6-cyber-fortress-full-movie');
 });
 
@@ -696,6 +718,7 @@ recordClipBtn.addEventListener('click', () => {
     exporter.stopRecording();
   } else {
     isGeneratingFullMovie = false;
+    renderCombinedResponseTable(getInterpolatedFrame(playheadFloat));
     exporter.startRecording('k6-cyber-fortress-clip');
   }
 });
@@ -1119,6 +1142,9 @@ function animate(now) {
     }
   }
   director.updateAndRender(dt, isPlaying || isLiveMode);
+  if (exporter.isRecording) {
+    exporter.renderCompositeFrame();
+  }
 
   requestAnimationFrame(animate);
 }
