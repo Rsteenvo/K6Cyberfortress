@@ -231,6 +231,7 @@ function syncLiveButtonUI() {
 
 // Video Exporter
 const exporter = new FortressVideoExporter(canvas, ({ isRecording }) => {
+  director.hideSutInVideo = isRecording;
   if (isRecording) {
     recordClipBtn.textContent = '⏹ Stop Recording';
     recordClipBtn.classList.add('btn-movie', 'recording');
@@ -709,7 +710,9 @@ generateMovieBtn.addEventListener('click', () => {
     isPlaying = true;
     playPauseBtn.textContent = '⏸ PAUSE';
   }
+  director.hideSutInVideo = true;
   renderCombinedResponseTable(getInterpolatedFrame(playheadFloat));
+  director.updateAndRender(0, isPlaying || isLiveMode);
   exporter.startRecording('k6-cyber-fortress-full-movie');
 });
 
@@ -718,7 +721,9 @@ recordClipBtn.addEventListener('click', () => {
     exporter.stopRecording();
   } else {
     isGeneratingFullMovie = false;
+    director.hideSutInVideo = true;
     renderCombinedResponseTable(getInterpolatedFrame(playheadFloat));
+    director.updateAndRender(0, isPlaying || isLiveMode);
     exporter.startRecording('k6-cyber-fortress-clip');
   }
 });

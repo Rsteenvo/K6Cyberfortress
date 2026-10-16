@@ -908,6 +908,7 @@ export class CyberFortressDirector {
     this.cameraMode = 'auto'; // 'auto' | 'orbit' | 'highway' | 'agents' | 'core' | 'top'
     this.showHudInCanvas = true;
     this.showSummaryOverlay = false;
+    this.hideSutInVideo = false;
     this.sutName = 'SUT // FORTRESS CITADEL';
     this.testTitle = 'NO BATTLE LOADED';
     this.sourceLabel = 'AWAITING INFLUXDB 1.8 CONNECTION';
@@ -3171,7 +3172,16 @@ export class CyberFortressDirector {
     ctx.fillStyle = '#f5f3ef';
     ctx.textAlign = 'left';
     const titlePrefix = this.isLiveMode ? '🔴 LIVE SIEGE // ' : '⚔️ ';
-    ctx.fillText(`${titlePrefix}${this.testTitle}`, 84, 48);
+    let displayHeaderTitle = this.testTitle;
+    if (this.hideSutInVideo) {
+      // Remove SUT name from the header title while preserving env/runId or generic siege title
+      displayHeaderTitle = displayHeaderTitle
+        .replace(/SUT:\s*[^·)]+\s*·?\s*/gi, '')
+        .replace(/^(DEMO SIEGE|INFLUXDB|LIVE)\s*\/\/\s*[^(]+(\(.+\))$/i, '$1 // K6 SIEGE EXECUTION $2')
+        .replace(/^(DEMO SIEGE|INFLUXDB|LIVE)\s*\/\/\s*.+$/i, '$1 // K6 SIEGE EXECUTION')
+        .trim();
+    }
+    ctx.fillText(`${titlePrefix}${displayHeaderTitle}`, 84, 48);
 
     ctx.font = '500 12px "JetBrains Mono", monospace';
     ctx.fillStyle = '#a1a0ab';
@@ -3716,12 +3726,23 @@ export class CyberFortressDirector {
 
     ctx.font = '800 21px "Cinzel", "Space Grotesk", Georgia, serif';
     ctx.fillStyle = '#f5f3ef';
-    const cleanTitle = this.testTitle.replace(/^DEMO SIEGE \/\/\s*/i, '');
+    let cleanTitle = this.testTitle.replace(/^DEMO SIEGE \/\/\s*/i, '');
+    if (this.hideSutInVideo) {
+      cleanTitle = cleanTitle
+        .replace(/SUT:\s*[^·)]+\s*·?\s*/gi, '')
+        .replace(/^[^(]+(\(.+\))$/i, 'K6 SIEGE EXECUTION $1')
+        .trim();
+      if (!cleanTitle || cleanTitle === this.sutName) {
+        cleanTitle = 'K6 SIEGE EXECUTION REPORT';
+      }
+    }
     ctx.fillText(this._truncateText(ctx, cleanTitle, maxTitleW), cx + 32, cy + 56);
 
     ctx.font = '500 12px "JetBrains Mono", monospace';
     ctx.fillStyle = '#a1a0ab';
-    const metaLine = `FORTRESS: ${this.sutName}   ·   SIEGE DURATION: ${formatElapsed(s.durationSec)}   ·   ${this.numLoadAgents} SIEGE LEGION${this.numLoadAgents > 1 ? 'S' : ''} DEPLOYED`;
+    const metaLine = this.hideSutInVideo
+      ? `SIEGE DURATION: ${formatElapsed(s.durationSec)}   ·   ${this.numLoadAgents} SIEGE LEGION${this.numLoadAgents > 1 ? 'S' : ''} DEPLOYED`
+      : `FORTRESS: ${this.sutName}   ·   SIEGE DURATION: ${formatElapsed(s.durationSec)}   ·   ${this.numLoadAgents} SIEGE LEGION${this.numLoadAgents > 1 ? 'S' : ''} DEPLOYED`;
     ctx.fillText(this._truncateText(ctx, metaLine, maxTitleW), cx + 32, cy + 80);
 
     // 6 KPI Cards (3x2 grid)

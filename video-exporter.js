@@ -12,13 +12,15 @@ export class FortressVideoExporter {
     this.chunks = [];
     this.isRecording = false;
 
-    // Dedicated 1920×1080 broadcast composite canvas that combines:
-    // - Left Panel (640×1080): Live "⚔️ Battle Scroll — Response Times" Table
-    // - Right Panel (1280×1080): 3D Siege Cinema + HUD + Graph + Summary
+    // Dedicated 2560×1440 (2K QHD) Master Broadcast Composite Canvas:
+    // - Left Panel (640×1408): Crisp high-DPI "⚔️ Battle Scroll — Response Times" Table
+    // - Right Panel (1872×1408): Full-resolution 1920×1080 3D Siege Cinema Stage (zero downscaling loss)
     this.recordCanvas = document.createElement('canvas');
-    this.recordCanvas.width = 1920;
-    this.recordCanvas.height = 1080;
+    this.recordCanvas.width = 2560;
+    this.recordCanvas.height = 1440;
     this.recordCtx = this.recordCanvas.getContext('2d', { alpha: false });
+    this.recordCtx.imageSmoothingEnabled = true;
+    this.recordCtx.imageSmoothingQuality = 'high';
 
     this.liveTableRows = [];
     this.liveTableBadge = 'NO DATA';
@@ -38,30 +40,29 @@ export class FortressVideoExporter {
   }
 
   /**
-   * Called once per animation frame from app.js (`animate()`) while recording is active
-   * (or unconditionally so `recordCanvas` is always up to date).
+   * Called once per animation frame from app.js (`animate()`) while recording is active.
    */
   renderCompositeFrame() {
     if (!this.isRecording) return;
 
     const ctx = this.recordCtx;
-    const W = this.recordCanvas.width;  // 1920
-    const H = this.recordCanvas.height; // 1080
+    const W = this.recordCanvas.width;  // 2560
+    const H = this.recordCanvas.height; // 1440
 
     // 1. Deep Obsidian & Warm Bronze Broadcast Frame Background
     ctx.fillStyle = '#09090d';
     ctx.fillRect(0, 0, W, H);
 
     const pad = 16;
-    const tableW = 636;
-    const tableH = H - pad * 2;
-    const stageX = pad + tableW + 14;
-    const stageW = W - stageX - pad; // 1254
+    const tableW = 640;
+    const tableH = H - pad * 2; // 1408
+    const stageX = pad + tableW + 16;
+    const stageW = W - stageX - pad; // 1872
 
-    // 2. Left Panel: "⚔️ BATTLE SCROLL — RESPONSE TIMES" Table Card
+    // 2. Left Panel: High-Resolution "⚔️ BATTLE SCROLL — RESPONSE TIMES" Table Card
     this._drawResponseTimesTablePanel(ctx, pad, pad, tableW, tableH);
 
-    // 3. Right Panel: 16:9 3D Siege Cinema Stage (preserving aspect ratio with obsidian letterbox + gold frame)
+    // 3. Right Panel: Full-Resolution 16:9 3D Siege Cinema Stage
     const stageAreaH = H - pad * 2;
     const targetAspect = this.stageCanvas.width / this.stageCanvas.height; // 16:9
     let drawW = stageW;
@@ -75,16 +76,18 @@ export class FortressVideoExporter {
 
     ctx.save();
     ctx.fillStyle = '#0c0c12';
-    ctx.strokeStyle = 'rgba(230, 198, 135, 0.32)';
-    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = 'rgba(230, 198, 135, 0.34)';
+    ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.roundRect(stageX, pad, stageW, stageAreaH, 10);
+    ctx.roundRect(stageX, pad, stageW, stageAreaH, 12);
     ctx.fill();
     ctx.stroke();
 
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(this.stageCanvas, drawX, drawY, drawW, drawH);
 
-    ctx.strokeStyle = 'rgba(230, 198, 135, 0.35)';
+    ctx.strokeStyle = 'rgba(230, 198, 135, 0.38)';
     ctx.lineWidth = 1.5;
     ctx.strokeRect(drawX, drawY, drawW, drawH);
     ctx.restore();
@@ -98,37 +101,37 @@ export class FortressVideoExporter {
     cardGrad.addColorStop(0, 'rgba(22, 22, 30, 0.96)');
     cardGrad.addColorStop(1, 'rgba(13, 13, 19, 0.98)');
     ctx.fillStyle = cardGrad;
-    ctx.strokeStyle = 'rgba(230, 198, 135, 0.32)';
-    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = 'rgba(230, 198, 135, 0.34)';
+    ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.roundRect(x, y, w, h, 10);
+    ctx.roundRect(x, y, w, h, 12);
     ctx.fill();
     ctx.stroke();
 
     // Card Header
-    const headerH = 48;
-    ctx.font = '800 14px "Cinzel", Georgia, serif';
+    const headerH = 54;
+    ctx.font = '800 15px "Cinzel", Georgia, serif';
     ctx.fillStyle = '#e6c687';
     ctx.textAlign = 'left';
-    ctx.fillText('⚔️ BATTLE SCROLL — RESPONSE TIMES', x + 16, y + 30);
+    ctx.fillText('⚔️ BATTLE SCROLL — RESPONSE TIMES', x + 16, y + 34);
 
     // Live Time Badge in Header Right
-    ctx.font = '700 11px "JetBrains Mono", monospace';
+    ctx.font = '700 11.5px "JetBrains Mono", monospace';
     const badgeStr = this.liveTableBadge || 'LIVE';
-    const badgeW = Math.max(96, ctx.measureText(badgeStr).width + 20);
+    const badgeW = Math.max(100, ctx.measureText(badgeStr).width + 22);
     const badgeX = x + w - badgeW - 14;
-    const badgeY = y + 13;
+    const badgeY = y + 15;
     ctx.fillStyle = 'rgba(230, 198, 135, 0.14)';
     ctx.strokeStyle = 'rgba(230, 198, 135, 0.36)';
-    ctx.lineWidth = 1;
+    ctx.lineWidth = 1.2;
     ctx.beginPath();
-    ctx.roundRect(badgeX, badgeY, badgeW, 24, 5);
+    ctx.roundRect(badgeX, badgeY, badgeW, 25, 5);
     ctx.fill();
     ctx.stroke();
 
     ctx.fillStyle = '#f5d996';
     ctx.textAlign = 'center';
-    ctx.fillText(badgeStr, badgeX + badgeW / 2, badgeY + 16);
+    ctx.fillText(badgeStr, badgeX + badgeW / 2, badgeY + 17);
 
     // Divider below card header
     ctx.strokeStyle = 'rgba(230, 198, 135, 0.22)';
@@ -139,31 +142,31 @@ export class FortressVideoExporter {
 
     // Inner Table Box
     const tblX = x + 10;
-    const tblY = y + headerH + 8;
+    const tblY = y + headerH + 10;
     const tblW = w - 20;
-    const tblH = h - headerH - 18;
+    const tblH = h - headerH - 20;
 
     ctx.fillStyle = 'rgba(10, 10, 15, 0.90)';
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.09)';
     ctx.beginPath();
-    ctx.roundRect(tblX, tblY, tblW, tblH, 7);
+    ctx.roundRect(tblX, tblY, tblW, tblH, 8);
     ctx.fill();
     ctx.stroke();
 
     // Column layout matching `# | METRICS | MIN | MAX | AVG | P95 | P99 | COUNT`
     const cols = [
       { label: '#',       x: tblX + 10,  align: 'left' },
-      { label: 'METRICS', x: tblX + 38,  align: 'left' },
-      { label: 'MIN',     x: tblX + 292, align: 'right' },
-      { label: 'MAX',     x: tblX + 354, align: 'right' },
-      { label: 'AVG',     x: tblX + 414, align: 'right' },
-      { label: 'P95',     x: tblX + 476, align: 'right' },
-      { label: 'P99',     x: tblX + 538, align: 'right' },
+      { label: 'METRICS', x: tblX + 40,  align: 'left' },
+      { label: 'MIN',     x: tblX + 294, align: 'right' },
+      { label: 'MAX',     x: tblX + 356, align: 'right' },
+      { label: 'AVG',     x: tblX + 416, align: 'right' },
+      { label: 'P95',     x: tblX + 478, align: 'right' },
+      { label: 'P99',     x: tblX + 540, align: 'right' },
       { label: 'COUNT',   x: tblX + tblW - 10, align: 'right' }
     ];
 
     // Sticky Table Header Row
-    const thH = 34;
+    const thH = 38;
     ctx.fillStyle = '#16161f';
     ctx.beginPath();
     ctx.roundRect(tblX + 1, tblY + 1, tblW - 2, thH, [6, 6, 0, 0]);
@@ -175,26 +178,26 @@ export class FortressVideoExporter {
     ctx.lineTo(tblX + tblW, tblY + thH);
     ctx.stroke();
 
-    ctx.font = '700 11px "JetBrains Mono", monospace';
+    ctx.font = '700 11.5px "JetBrains Mono", monospace';
     ctx.fillStyle = '#e6c687';
     cols.forEach((col) => {
       ctx.textAlign = col.align;
-      ctx.fillText(col.label, col.x, tblY + 22);
+      ctx.fillText(col.label, col.x, tblY + 24);
     });
 
     // Render Table Rows
     const rows = this.liveTableRows || [];
     if (!rows.length) {
-      ctx.font = '600 12px "JetBrains Mono", monospace';
+      ctx.font = '600 13px "JetBrains Mono", monospace';
       ctx.fillStyle = '#8b8a96';
       ctx.textAlign = 'center';
-      ctx.fillText('NO DATA — Connect InfluxDB 1.8', tblX + tblW / 2, tblY + 80);
+      ctx.fillText('NO DATA — Connect InfluxDB 1.8', tblX + tblW / 2, tblY + 90);
       ctx.restore();
       return;
     }
 
-    const availH = tblH - thH - 6;
-    const rowH = Math.min(36, Math.max(24, Math.floor(availH / Math.max(1, rows.length))));
+    const availH = tblH - thH - 8;
+    const rowH = Math.min(42, Math.max(26, Math.floor(availH / Math.max(1, rows.length))));
 
     rows.forEach((r, idx) => {
       const ry = tblY + thH + idx * rowH;
@@ -214,20 +217,20 @@ export class FortressVideoExporter {
       const textY = ry + Math.round(rowH * 0.64);
 
       // # Step
-      ctx.font = '700 11px "JetBrains Mono", monospace';
+      ctx.font = '700 11.5px "JetBrains Mono", monospace';
       ctx.fillStyle = '#e6c687';
       ctx.textAlign = 'left';
       ctx.fillText(String(r.step || String(idx + 1).padStart(2, '0')), cols[0].x, textY);
 
-      // METRICS Name (clipped cleanly if very long)
-      ctx.font = '600 11px "JetBrains Mono", monospace';
+      // METRICS Name
+      ctx.font = '600 11.5px "JetBrains Mono", monospace';
       ctx.fillStyle = '#f5f3ef';
       let metricName = String(r.name || '');
       if (metricName.length > 26) metricName = `${metricName.slice(0, 25)}…`;
       ctx.fillText(metricName, cols[1].x, textY);
 
       // MIN, MAX, AVG
-      ctx.font = '500 11px "JetBrains Mono", monospace';
+      ctx.font = '500 11.5px "JetBrains Mono", monospace';
       ctx.fillStyle = '#d4d4dc';
       ctx.textAlign = 'right';
       ctx.fillText(`${r.min}ms`, cols[2].x, textY);
@@ -235,12 +238,12 @@ export class FortressVideoExporter {
       ctx.fillText(`${r.avg}ms`, cols[4].x, textY);
 
       // P95 (color-coded by SLA threshold)
-      ctx.font = '700 11px "JetBrains Mono", monospace';
+      ctx.font = '700 11.5px "JetBrains Mono", monospace';
       ctx.fillStyle = r.p95Color || '#e6c687';
       ctx.fillText(`${r.p95}ms`, cols[5].x, textY);
 
       // P99
-      ctx.font = '500 11px "JetBrains Mono", monospace';
+      ctx.font = '500 11.5px "JetBrains Mono", monospace';
       ctx.fillStyle = '#d4d4dc';
       ctx.fillText(`${r.p99}ms`, cols[6].x, textY);
 
@@ -276,7 +279,7 @@ export class FortressVideoExporter {
     const stream = this.recordCanvas.captureStream(60);
     const mimeType = this.getSupportedMimeType();
     const options = {
-      videoBitsPerSecond: 16_000_000 // 16 Mbps for crisp 1080p table text & 3D siege detail
+      videoBitsPerSecond: 24_000_000 // 24 Mbps for ultra-crisp 2K (2560×1440) table text & 3D siege detail
     };
     if (mimeType) options.mimeType = mimeType;
 
