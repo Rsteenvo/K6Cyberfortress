@@ -60,6 +60,10 @@
           📜 Battle Summary
         </button>
 
+        <button type="button" class="btn" id="fullscreen-btn" title="Full Screen Cinema Mode — view only the 3D battle animation (Shortcut: F or Esc)">
+          ⛶ Full Screen
+        </button>
+
         <button type="button" class="btn btn-primary" id="open-influx-btn">
           ⚡ InfluxDB 1.8 / Grafana
         </button>
@@ -167,8 +171,17 @@
       </aside>
 
       <div class="canvas-stage-wrapper">
-        <div class="canvas-frame">
+        <div class="canvas-frame" id="canvas-frame">
           <canvas id="cinema-canvas" width="1920" height="1080" aria-label="3D Sparta Total War k6 siege execution visualizer"></canvas>
+          <button
+            type="button"
+            class="exit-fullscreen-btn"
+            id="exit-fullscreen-btn"
+            title="Exit Full Screen Animation Mode (Esc or F)"
+            aria-label="Exit Full Screen Mode"
+          >
+            ✕ Exit Full Screen (Esc)
+          </button>
         </div>
       </div>
     </main>

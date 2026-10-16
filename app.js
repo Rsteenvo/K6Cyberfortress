@@ -14,9 +14,12 @@ import { CyberFortressDirector } from './fortress-scene.js';
 import { FortressVideoExporter } from './video-exporter.js';
 
 const canvas = document.getElementById('cinema-canvas');
+const canvasFrame = document.getElementById('canvas-frame');
 const runnerCountSelect = document.getElementById('runner-count-select');
 const liveViewBtn = document.getElementById('live-view-btn');
 const toggleSummaryBtn = document.getElementById('toggle-summary-btn');
+const fullscreenBtn = document.getElementById('fullscreen-btn');
+const exitFullscreenBtn = document.getElementById('exit-fullscreen-btn');
 const playPauseBtn = document.getElementById('play-pause-btn');
 const restartBtn = document.getElementById('restart-btn');
 const timelineSlider = document.getElementById('timeline-slider');
@@ -478,6 +481,78 @@ toggleSummaryBtn.addEventListener('click', () => {
   if (!director.hasData) return;
   director.showSummaryOverlay = !director.showSummaryOverlay;
   syncSummaryButtonUI();
+});
+
+// Full Screen Animation-Only Mode (hides all app chrome + HUD overlays so only the 3D battle animation is visible)
+let isAnimationFullscreen = false;
+
+function syncFullscreenUI(active) {
+  isAnimationFullscreen = active;
+  document.body.classList.toggle('fullscreen-animation-only', active);
+  director.showHudInCanvas = !active;
+  if (fullscreenBtn) {
+    fullscreenBtn.classList.toggle('btn-primary', active);
+    fullscreenBtn.textContent = active ? '✕ Exit Full Screen' : '⛶ Full Screen';
+  }
+}
+
+async function enterAnimationFullscreen() {
+  syncFullscreenUI(true);
+  if (canvasFrame && canvasFrame.requestFullscreen && !document.fullscreenElement) {
+    try {
+      await canvasFrame.requestFullscreen();
+    } catch (_) {
+      // Fallback to viewport-filling CSS mode (`body.fullscreen-animation-only`) when browser blocks native fullscreen
+    }
+  }
+}
+
+async function exitAnimationFullscreen() {
+  syncFullscreenUI(false);
+  if (document.fullscreenElement && document.exitFullscreen) {
+    try {
+      await document.exitFullscreen();
+    } catch (_) {
+      // Ignore if already exited
+    }
+  }
+}
+
+function toggleAnimationFullscreen() {
+  if (isAnimationFullscreen || document.fullscreenElement) {
+    exitAnimationFullscreen();
+  } else {
+    enterAnimationFullscreen();
+  }
+}
+
+if (fullscreenBtn) {
+  fullscreenBtn.addEventListener('click', toggleAnimationFullscreen);
+}
+
+if (exitFullscreenBtn) {
+  exitFullscreenBtn.addEventListener('click', exitAnimationFullscreen);
+}
+
+document.addEventListener('fullscreenchange', () => {
+  if (!document.fullscreenElement && isAnimationFullscreen) {
+    syncFullscreenUI(false);
+  } else if (document.fullscreenElement === canvasFrame && !isAnimationFullscreen) {
+    syncFullscreenUI(true);
+  }
+});
+
+document.addEventListener('keydown', (e) => {
+  const tag = (e.target && e.target.tagName) ? e.target.tagName.toUpperCase() : '';
+  if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || influxDialog?.open) {
+    return;
+  }
+  if (e.key === 'Escape' && isAnimationFullscreen) {
+    exitAnimationFullscreen();
+  } else if ((e.key === 'f' || e.key === 'F') && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    e.preventDefault();
+    toggleAnimationFullscreen();
+  }
 });
 
 playPauseBtn.addEventListener('click', () => {

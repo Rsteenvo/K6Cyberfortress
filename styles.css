@@ -568,10 +568,99 @@ body {
   height: 100%;
   display: block;
   cursor: grab;
+  object-fit: contain;
 }
 
 #cinema-canvas:active {
   cursor: grabbing;
+}
+
+/* Floating Exit Full Screen Button inside the 3D Stage */
+.exit-fullscreen-btn {
+  position: absolute;
+  top: 1.1rem;
+  right: 1.25rem;
+  z-index: 50;
+  display: none;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.48rem 0.92rem;
+  border-radius: 6px;
+  border: 1px solid rgba(230, 198, 135, 0.55);
+  background: rgba(14, 14, 20, 0.78);
+  color: var(--gold-bright);
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  font-weight: 700;
+  cursor: pointer;
+  backdrop-filter: blur(10px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.75);
+  opacity: 0.35;
+  transition: opacity 0.22s ease, transform 0.18s ease, border-color 0.18s ease;
+}
+
+.canvas-frame:hover .exit-fullscreen-btn,
+.exit-fullscreen-btn:hover,
+.exit-fullscreen-btn:focus-visible {
+  opacity: 1;
+}
+
+.exit-fullscreen-btn:hover {
+  border-color: var(--gold-bright);
+  background: rgba(28, 24, 20, 0.92);
+  transform: translateY(-1px);
+}
+
+/* Full Screen Animation-Only Mode (both Browser Fullscreen API and Viewport Fill Fallback) */
+body.fullscreen-animation-only .top-nav,
+body.fullscreen-animation-only .variable-filter-bar,
+body.fullscreen-animation-only .response-table-sidebar,
+body.fullscreen-animation-only .transport-deck {
+  display: none !important;
+}
+
+body.fullscreen-animation-only .app-shell {
+  display: block;
+  width: 100vw;
+  height: 100vh;
+  padding: 0;
+  margin: 0;
+  background: #06070a;
+}
+
+body.fullscreen-animation-only .viewport-stage {
+  display: flex;
+  width: 100vw;
+  height: 100vh;
+  padding: 0;
+  gap: 0;
+  background: #06070a;
+}
+
+body.fullscreen-animation-only .canvas-stage-wrapper {
+  width: 100vw;
+  height: 100vh;
+  background: #06070a;
+}
+
+body.fullscreen-animation-only .canvas-frame,
+.canvas-frame:fullscreen {
+  width: 100vw !important;
+  height: 100vh !important;
+  max-width: none !important;
+  aspect-ratio: auto !important;
+  border: none !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  background: #06070a !important;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+body.fullscreen-animation-only .exit-fullscreen-btn,
+.canvas-frame:fullscreen .exit-fullscreen-btn {
+  display: inline-flex;
 }
 
 /* 3D Zoom & Fortress Position Controls (Inline next to Sync Filters) */
